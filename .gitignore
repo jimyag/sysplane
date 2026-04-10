@@ -1,0 +1,29 @@
+# Binaries
+bin/
+sys-mcp-agent
+sys-mcp-proxy
+sys-mcp-center
+sys-mcp-client
+
+# Go build cache
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go workspace
+go.work
+go.work.sum
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
