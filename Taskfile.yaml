@@ -15,10 +15,11 @@ tasks:
       - mkdir -p api/tunnel
       - |
         protoc \
-          --go_out=. \
-          --go_opt=Mapi/proto/tunnel.proto={{.MODULE}}/api/tunnel \
-          --go-grpc_out=. \
-          --go-grpc_opt=Mapi/proto/tunnel.proto={{.MODULE}}/api/tunnel \
+          --go_out=api/tunnel \
+          --go_opt=paths=source_relative \
+          --go-grpc_out=api/tunnel \
+          --go-grpc_opt=paths=source_relative \
+          -I api/proto \
           api/proto/tunnel.proto
     sources:
       - api/proto/tunnel.proto

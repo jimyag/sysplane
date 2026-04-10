@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+package tunnel;
+
+option go_package = "github.com/jimyag/sys-mcp/api/tunnel";
+
+// NodeType identifies what kind of node is registering.
+enum NodeType {
+  NODE_TYPE_UNSPECIFIED = 0;
+  NODE_TYPE_AGENT       = 1;
+  NODE_TYPE_PROXY       = 2;
+}
+
+// TunnelService is the single bidirectional streaming RPC used by all nodes.
+service TunnelService {
+  rpc Connect(stream TunnelMessage) returns (stream TunnelMessage);
+}
+
+// TunnelMessage is the envelope for every message on the stream.
+message TunnelMessage {
+  oneof payload {
+    RegisterRequest  register_request  = 1;
+    RegisterAck      register_ack      = 2;
+    Heartbeat        heartbeat         = 3;
+    HeartbeatAck     heartbeat_ack     = 4;
+    ToolRequest      tool_request      = 5;
+    ToolResponse     tool_response     = 6;
+    ErrorResponse    error_response    = 7;
+    CancelRequest    cancel_request    = 8;
+  }
+}
+
+// RegisterRequest is the first message sent by agent/proxy after connecting.
+message RegisterRequest {
+  string   hostname      = 1; // e.g. "web-01.idc-a"
+  string   ip            = 2; // primary IP of this node
+  string   os            = 3; // e.g. "linux/amd64"
+  string   agent_version = 4;
+  NodeType node_type     = 5;
+  // proxy_path is the chain of proxy hostnames prepended by each proxy hop.
+  // Agents send this empty; each proxy appends its own hostname before forwarding.
+  repeated string proxy_path = 6;
+  string   token         = 7; // bearer token for authentication
+}
+
+// RegisterAck is sent by center/proxy after accepting a registration.
+message RegisterAck {
+  bool   success = 1;
+  string message = 2; // human-readable, e.g. error reason on failure
+}
+
+// Heartbeat is sent by agent/proxy periodically.
+message Heartbeat {
+  int64 timestamp_ms = 1; // Unix ms
+}
+
+// HeartbeatAck is sent by center/proxy in response.
+message HeartbeatAck {
+  int64 timestamp_ms = 1;
+}
+
+// ToolRequest is sent by center to agent to invoke a tool.
+message ToolRequest {
+  string request_id = 1; // unique, used to correlate response
+  string tool_name  = 2;
+  string args_json  = 3; // JSON-encoded tool arguments
+}
+
+// ToolResponse carries the result from agent back to center.
+message ToolResponse {
+  string request_id   = 1;
+  string result_json  = 2; // JSON-encoded result
+}
+
+// ErrorResponse carries an error from agent or center.
+message ErrorResponse {
+  string request_id = 1;
+  string code       = 2; // e.g. "TOOL_NOT_FOUND", "TIMEOUT", "PERMISSION_DENIED"
+  string message    = 3;
+}
+
+// CancelRequest asks agent to cancel an in-flight tool call.
+message CancelRequest {
+  string request_id = 1;
+}
