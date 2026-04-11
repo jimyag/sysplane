@@ -1,9 +1,9 @@
-# Binaries
+# Binaries (only at repo root)
 bin/
-sys-mcp-agent
-sys-mcp-proxy
-sys-mcp-center
-sys-mcp-client
+/sys-mcp-agent
+/sys-mcp-proxy
+/sys-mcp-center
+/sys-mcp-client
 
 # Go build cache
 *.exe
