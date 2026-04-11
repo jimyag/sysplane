@@ -18,6 +18,8 @@ type AgentConfig struct {
 	ToolTimeoutSec int `yaml:"tool_timeout_sec"`
 	// ReconnectMaxDelaySec is the max reconnect backoff in seconds. Default: 5.
 	ReconnectMaxDelaySec int `yaml:"reconnect_max_delay_sec"`
+	// Hostname overrides os.Hostname() for the agent's identity.
+	Hostname string `yaml:"hostname"`
 }
 
 // Upstream describes how the agent connects to a center or proxy.

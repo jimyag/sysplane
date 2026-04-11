@@ -78,7 +78,10 @@ func (a *Agent) Run(ctx context.Context) error {
 		return err
 	}
 
-	hostname, _ := os.Hostname()
+	hostname := a.cfg.Hostname
+	if hostname == "" {
+		hostname, _ = os.Hostname()
+	}
 	registerMsg := &tunnel.TunnelMessage{
 		Payload: &tunnel.TunnelMessage_RegisterRequest{
 			RegisterRequest: &tunnel.RegisterRequest{
