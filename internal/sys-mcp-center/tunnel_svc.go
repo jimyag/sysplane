@@ -131,6 +131,10 @@ func (s *TunnelServiceServer) Connect(srv tunnel.TunnelService_ConnectServer) er
 		for _, h := range removed {
 			s.logger.Info("agent unregistered", "hostname", h)
 			if s.persister != nil {
+				// Mark offline immediately on stream close so the PG record reflects
+				// the real state without waiting for the next offline-checker cycle.
+				// The offline checker may also call SetAgentOffline later (~15s), but
+				// that is an idempotent UPDATE and acceptable as a no-op.
 				go func(hostname string) {
 					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 					defer cancel()

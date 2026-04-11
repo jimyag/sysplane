@@ -160,9 +160,12 @@ func (r *Registry) checkOffline(ctx context.Context, timeout time.Duration, onOf
 	r.mu.Unlock()
 	metrics.AgentsOnline.Set(float64(online))
 
-	// 回调在锁外执行，避免死锁
+	// 回调在锁外执行，避免死锁；跳过 nil 函数（调用者误传时不 panic）
 	for _, h := range justOffline {
 		for _, fn := range onOffline {
+			if fn == nil {
+				continue
+			}
 			fn(ctx, h)
 		}
 	}

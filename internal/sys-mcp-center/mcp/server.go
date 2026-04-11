@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
@@ -279,8 +280,20 @@ func registerMultiTool(srv *sdkmcp.Server, reg *registry.Registry, rtr *router.R
 			}
 		}
 
-		// 决定目标列表：只包含 agent 节点（排除 proxy 聚合节点）
-		var records []*registry.AgentRecord
+		argsJSON := "{}"
+		if params.Args != nil {
+			argsJSON = string(params.Args)
+		}
+		requestIDBase := fmt.Sprintf("multi-%s-%d", singleTool, time.Now().UnixNano())
+
+		// resultMap accumulates all per-host results; populated by local batch and remote forwards.
+		resultMap := make(map[string]interface{})
+
+		// Categorise explicit target hosts into: local agents, proxy errors, remote (HA) hosts.
+		// When TargetHosts is empty, collect all online local agents.
+		var records []*registry.AgentRecord    // local agents to batch-send
+		var remoteHosts []string               // hosts not found locally; try cross-instance fwd
+
 		if len(params.TargetHosts) == 0 {
 			for _, r := range reg.All() {
 				if r.Status == registry.StatusOnline && r.NodeType == "agent" {
@@ -290,57 +303,90 @@ func registerMultiTool(srv *sdkmcp.Server, reg *registry.Registry, rtr *router.R
 		} else {
 			for _, h := range params.TargetHosts {
 				r := reg.Lookup(h)
-				if r != nil {
+				switch {
+				case r == nil:
+					// Not in local registry; try HA forwarding later.
+					remoteHosts = append(remoteHosts, h)
+				case r.NodeType != "agent":
+					// Proxy nodes cannot execute tools.
+					resultMap[h] = map[string]string{"error": "target is a proxy node, not an agent"}
+				default:
 					records = append(records, r)
 				}
-				// 本地找不到时尝试跨实例转发（由各工具的单机路径处理，此处跳过）
 			}
 		}
 
-		if len(records) == 0 {
+		// --- 1. Local batch ---
+		if len(records) > 0 {
+			if log != nil {
+				for _, rec := range records {
+					rid := requestIDBase + "_" + rec.Hostname
+					_ = log.InsertToolCallLog(ctx, rid, instanceID, rec.Hostname, singleTool, argsJSON)
+				}
+			}
+
+			for _, mr := range rtr.SendMulti(ctx, records, requestIDBase, singleTool, argsJSON) {
+				if log != nil {
+					rid := requestIDBase + "_" + mr.Hostname
+					if mr.Err != nil {
+						_ = log.CompleteToolCallLog(ctx, rid, "", mr.Err.Error())
+					} else {
+						_ = log.CompleteToolCallLog(ctx, rid, mr.Result, "")
+					}
+				}
+				if mr.Err != nil {
+					resultMap[mr.Hostname] = map[string]string{"error": mr.Err.Error()}
+				} else {
+					var parsed interface{}
+					if err := json.Unmarshal([]byte(mr.Result), &parsed); err != nil {
+						resultMap[mr.Hostname] = mr.Result
+					} else {
+						resultMap[mr.Hostname] = parsed
+					}
+				}
+			}
+		}
+
+		// --- 2. Cross-instance forwards (concurrent) ---
+		if len(remoteHosts) > 0 {
+			var wg sync.WaitGroup
+			var mu sync.Mutex
+			for _, h := range remoteHosts {
+				wg.Add(1)
+				go func(host string) {
+					defer wg.Done()
+					var entry interface{}
+					if fwd != nil {
+						reqID := requestIDBase + "_" + host
+						result, forwarded, err := fwd.ForwardIfNeeded(ctx, reqID, host, singleTool, argsJSON)
+						switch {
+						case err != nil:
+							entry = map[string]string{"error": err.Error()}
+						case forwarded:
+							var parsed interface{}
+							if jsonErr := json.Unmarshal([]byte(result), &parsed); jsonErr != nil {
+								entry = result
+							} else {
+								entry = parsed
+							}
+						default:
+							entry = map[string]string{"error": "agent not found"}
+						}
+					} else {
+						entry = map[string]string{"error": "agent not found"}
+					}
+					mu.Lock()
+					resultMap[host] = entry
+					mu.Unlock()
+				}(h)
+			}
+			wg.Wait()
+		}
+
+		if len(resultMap) == 0 {
 			return &sdkmcp.CallToolResult{
 				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: `{"agents":[],"message":"没有在线的 agent"}`}},
 			}, nil
-		}
-
-		argsJSON := "{}"
-		if params.Args != nil {
-			argsJSON = string(params.Args)
-		}
-
-		requestIDBase := fmt.Sprintf("multi-%s-%d", singleTool, time.Now().UnixNano())
-
-		// 记录调用日志
-		if log != nil {
-			for _, rec := range records {
-				rid := requestIDBase + "-" + rec.Hostname
-				_ = log.InsertToolCallLog(ctx, rid, instanceID, rec.Hostname, singleTool, argsJSON)
-			}
-		}
-
-		multiResults := rtr.SendMulti(ctx, records, requestIDBase, singleTool, argsJSON)
-
-		// 聚合结果为 map
-		resultMap := make(map[string]interface{}, len(multiResults))
-		for _, mr := range multiResults {
-			if log != nil {
-				rid := requestIDBase + "-" + mr.Hostname
-				if mr.Err != nil {
-					_ = log.CompleteToolCallLog(ctx, rid, "", mr.Err.Error())
-				} else {
-					_ = log.CompleteToolCallLog(ctx, rid, mr.Result, "")
-				}
-			}
-			if mr.Err != nil {
-				resultMap[mr.Hostname] = map[string]string{"error": mr.Err.Error()}
-			} else {
-				var parsed interface{}
-				if err := json.Unmarshal([]byte(mr.Result), &parsed); err != nil {
-					resultMap[mr.Hostname] = mr.Result
-				} else {
-					resultMap[mr.Hostname] = parsed
-				}
-			}
 		}
 
 		b, _ := json.Marshal(resultMap)
