@@ -9,6 +9,7 @@ import (
 
 	"github.com/jimyag/sys-mcp/api/tunnel"
 	pkgstream "github.com/jimyag/sys-mcp/internal/pkg/stream"
+	"github.com/jimyag/sys-mcp/internal/sys-mcp-center/metrics"
 	"github.com/jimyag/sys-mcp/internal/sys-mcp-center/registry"
 )
 
@@ -33,6 +34,13 @@ func New(timeoutSec int) *Router {
 // Send sends a tool request to the agent described by rec and waits for the response.
 // Returns the result JSON string or an error.
 func (r *Router) Send(ctx context.Context, rec *registry.AgentRecord, requestID, toolName, argsJSON string) (string, error) {
+	start := time.Now()
+	status := "success"
+	defer func() {
+		metrics.ToolRequestsTotal.WithLabelValues(toolName, status).Inc()
+		metrics.ToolRequestDuration.WithLabelValues(toolName).Observe(time.Since(start).Seconds())
+	}()
+
 	slot := &pendingSlot{ch: make(chan *tunnel.TunnelMessage, 1)}
 	r.pending.Store(requestID, slot)
 	defer r.pending.Delete(requestID)
@@ -47,6 +55,7 @@ func (r *Router) Send(ctx context.Context, rec *registry.AgentRecord, requestID,
 			},
 		},
 	}); err != nil {
+		status = "error"
 		return "", fmt.Errorf("router: send to agent %s: %w", rec.Hostname, err)
 	}
 
@@ -56,17 +65,45 @@ func (r *Router) Send(ctx context.Context, rec *registry.AgentRecord, requestID,
 
 	select {
 	case <-ctx.Done():
+		status = "timeout"
 		return "", fmt.Errorf("router: timeout waiting for response from %s (request %s)", rec.Hostname, requestID)
 	case msg := <-slot.ch:
 		switch p := msg.Payload.(type) {
 		case *tunnel.TunnelMessage_ToolResponse:
 			return p.ToolResponse.ResultJson, nil
 		case *tunnel.TunnelMessage_ErrorResponse:
+			status = "error"
 			return "", fmt.Errorf("agent error [%s]: %s", p.ErrorResponse.Code, p.ErrorResponse.Message)
 		default:
+			status = "error"
 			return "", fmt.Errorf("router: unexpected response type %T", msg.Payload)
 		}
 	}
+}
+
+// MultiResult 保存单台 agent 的工具执行结果。
+type MultiResult struct {
+	Hostname string
+	Result   string
+	Err      error
+}
+
+// SendMulti 并发向多台 agent 发送同一工具请求，聚合结果。
+// 每台 agent 使用独立的 requestID（requestIDBase + "_" + hostname）。
+func (r *Router) SendMulti(ctx context.Context, records []*registry.AgentRecord, requestIDBase, toolName, argsJSON string) []MultiResult {
+	results := make([]MultiResult, len(records))
+	var wg sync.WaitGroup
+	for i, rec := range records {
+		wg.Add(1)
+		go func(idx int, rec *registry.AgentRecord) {
+			defer wg.Done()
+			reqID := requestIDBase + "_" + rec.Hostname
+			res, err := r.Send(ctx, rec, reqID, toolName, argsJSON)
+			results[idx] = MultiResult{Hostname: rec.Hostname, Result: res, Err: err}
+		}(i, rec)
+	}
+	wg.Wait()
+	return results
 }
 
 // Deliver delivers a response to a waiting Send call.

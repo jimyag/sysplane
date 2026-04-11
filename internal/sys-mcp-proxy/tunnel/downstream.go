@@ -143,6 +143,23 @@ func (s *DownstreamService) Connect(srv tunnel.TunnelService_ConnectServer) erro
 					HeartbeatAck: &tunnel.HeartbeatAck{TimestampMs: p.Heartbeat.TimestampMs},
 				},
 			})
+			// 向 upstream (center) 转发一个 RegisterRequest，以更新 center 侧的 LastHeartbeat，
+			// 防止 center 因长时间未收到心跳而将该 agent 标记为 offline。
+			if hbRec := s.reg.Lookup(req.Hostname); hbRec != nil {
+				upstreamPath := append([]string{s.proxyHostname}, hbRec.ProxyPath...)
+				_ = s.upstream.Send(&tunnel.TunnelMessage{
+					Payload: &tunnel.TunnelMessage_RegisterRequest{
+						RegisterRequest: &tunnel.RegisterRequest{
+							Hostname:     hbRec.Hostname,
+							Ip:           hbRec.IP,
+							Os:           hbRec.OS,
+							AgentVersion: hbRec.AgentVersion,
+							NodeType:     nodeTypeProto(hbRec.NodeType),
+							ProxyPath:    upstreamPath,
+						},
+					},
+				})
+			}
 		case *tunnel.TunnelMessage_ToolResponse:
 			// Forward tool response upstream so center can deliver it.
 			_ = s.upstream.Send(msg)

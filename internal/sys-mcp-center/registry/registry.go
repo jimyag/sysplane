@@ -7,6 +7,7 @@ import (
 	"time"
 
 	pkgstream "github.com/jimyag/sys-mcp/internal/pkg/stream"
+	"github.com/jimyag/sys-mcp/internal/sys-mcp-center/metrics"
 )
 
 // Status represents the online/offline state of an agent.
@@ -47,6 +48,13 @@ func (r *Registry) Register(rec *AgentRecord) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.records[rec.Hostname] = rec
+	online := 0
+	for _, v := range r.records {
+		if v.Status == StatusOnline {
+			online++
+		}
+	}
+	metrics.AgentsOnline.Set(float64(online))
 }
 
 // Unregister removes the record for hostname.
@@ -139,4 +147,12 @@ func (r *Registry) checkOffline(timeout time.Duration) {
 			rec.Status = StatusOffline
 		}
 	}
+	// 统计在线数并更新 gauge
+	online := 0
+	for _, rec := range r.records {
+		if rec.Status == StatusOnline {
+			online++
+		}
+	}
+	metrics.AgentsOnline.Set(float64(online))
 }

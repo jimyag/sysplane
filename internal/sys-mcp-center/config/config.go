@@ -10,10 +10,12 @@ import (
 
 // CenterConfig is the root configuration for sys-mcp-center.
 type CenterConfig struct {
-	Listen  Listen  `yaml:"listen"`
-	Auth    Auth    `yaml:"auth"`
-	Router  Router  `yaml:"router"`
-	Logging Logging `yaml:"logging"`
+	Listen   Listen   `yaml:"listen"`
+	Auth     Auth     `yaml:"auth"`
+	Router   Router   `yaml:"router"`
+	Logging  Logging  `yaml:"logging"`
+	Database Database `yaml:"database"`
+	Metrics  Metrics  `yaml:"metrics"`
 }
 
 // Listen describes the network addresses for center.
@@ -50,6 +52,24 @@ type Logging struct {
 	Format string `yaml:"format"` // json/text. Default: json
 }
 
+// Database 配置 PostgreSQL 连接（可选）。
+type Database struct {
+	// Enable 为 true 时启用 PostgreSQL 持久化注册表。
+	Enable bool `yaml:"enable"`
+	// DSN 是 PostgreSQL 连接串，例如 "postgres://postgres:postgres@localhost:5432/sys_mcp"。
+	DSN string `yaml:"dsn"`
+	// MaxConns 是连接池最大连接数，默认 10。
+	MaxConns int `yaml:"max_conns"`
+}
+
+// Metrics 配置 Prometheus 指标暴露（可选）。
+type Metrics struct {
+	// Enable 为 true 时暴露 /metrics 端点。
+	Enable bool `yaml:"enable"`
+	// Address 是 metrics HTTP 服务监听地址，默认 ":9091"。
+	Address string `yaml:"address"`
+}
+
 // Load reads the YAML file at path and returns a validated CenterConfig.
 func Load(path string) (*CenterConfig, error) {
 	data, err := os.ReadFile(path)
@@ -82,6 +102,12 @@ func applyDefaults(cfg *CenterConfig) {
 	}
 	if cfg.Logging.Format == "" {
 		cfg.Logging.Format = "json"
+	}
+	if cfg.Database.MaxConns <= 0 {
+		cfg.Database.MaxConns = 10
+	}
+	if cfg.Metrics.Address == "" {
+		cfg.Metrics.Address = ":9091"
 	}
 }
 

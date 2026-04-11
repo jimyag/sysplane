@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
+	"time"
 
 	"github.com/google/jsonschema-go/jsonschema"
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -40,6 +42,10 @@ func buildServer(reg *registry.Registry, rtr *router.Router) *sdkmcp.Server {
 	for _, toolName := range agentToolNames {
 		registerAgentProxyTool(srv, reg, rtr, toolName)
 	}
+
+	// 多机并发工具
+	registerMultiTool(srv, reg, rtr, "get_hardware_info_multi")
+	registerMultiTool(srv, reg, rtr, "list_directory_multi")
 
 	return srv
 }
@@ -179,3 +185,96 @@ func agentToolDescription(name string) string {
 		return fmt.Sprintf("Proxy tool %s. Requires target_host.", name)
 	}
 }
+
+// multiToolSchema 定义多机工具的输入 schema：包含 target_hosts 数组和可选的 args。
+var multiToolSchema = &jsonschema.Schema{
+	Type: "object",
+	Properties: map[string]*jsonschema.Schema{
+		"target_hosts": {
+			Type:        "array",
+			Description: "目标主机名列表，留空表示查询所有在线主机",
+			Items:       &jsonschema.Schema{Type: "string"},
+		},
+		"args": {
+			Type:        "object",
+			Description: "透传给底层工具的参数（与单机工具相同）",
+		},
+	},
+}
+
+// registerMultiTool 注册一个多机并发工具，工具名约定为 <singleToolName>_multi。
+// 底层调用对应的单机工具名（去掉 _multi 后缀）。
+func registerMultiTool(srv *sdkmcp.Server, reg *registry.Registry, rtr *router.Router, toolName string) {
+	singleTool := strings.TrimSuffix(toolName, "_multi")
+
+	tool := &sdkmcp.Tool{
+		Name:        toolName,
+		Description: fmt.Sprintf("在多台 agent 上并发执行 %s，返回各主机的结果 map。", singleTool),
+		InputSchema: multiToolSchema,
+	}
+
+	srv.AddTool(tool, func(ctx context.Context, req *sdkmcp.CallToolRequest) (*sdkmcp.CallToolResult, error) {
+		var params struct {
+			TargetHosts []string        `json:"target_hosts"`
+			Args        json.RawMessage `json:"args"`
+		}
+		if req.Params.Arguments != nil {
+			if err := json.Unmarshal(req.Params.Arguments, &params); err != nil {
+				return nil, fmt.Errorf("parse args: %w", err)
+			}
+		}
+
+		// 决定目标列表
+		var records []*registry.AgentRecord
+		if len(params.TargetHosts) == 0 {
+			for _, r := range reg.All() {
+				if r.Status == registry.StatusOnline {
+					records = append(records, r)
+				}
+			}
+		} else {
+			for _, h := range params.TargetHosts {
+				r := reg.Lookup(h)
+				if r == nil {
+					return nil, fmt.Errorf("agent not found: %s", h)
+				}
+				records = append(records, r)
+			}
+		}
+
+		if len(records) == 0 {
+			return &sdkmcp.CallToolResult{
+				Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: `{"agents":[],"message":"没有在线的 agent"}`}},
+			}, nil
+		}
+
+		argsJSON := "{}"
+		if params.Args != nil {
+			argsJSON = string(params.Args)
+		}
+
+		requestIDBase := fmt.Sprintf("multi-%s-%d", singleTool, time.Now().UnixNano())
+		multiResults := rtr.SendMulti(ctx, records, requestIDBase, singleTool, argsJSON)
+
+		// 聚合结果为 map
+		resultMap := make(map[string]interface{}, len(multiResults))
+		for _, mr := range multiResults {
+			if mr.Err != nil {
+				resultMap[mr.Hostname] = map[string]string{"error": mr.Err.Error()}
+			} else {
+				var parsed interface{}
+				if err := json.Unmarshal([]byte(mr.Result), &parsed); err != nil {
+					resultMap[mr.Hostname] = mr.Result
+				} else {
+					resultMap[mr.Hostname] = parsed
+				}
+			}
+		}
+
+		b, _ := json.Marshal(resultMap)
+		return &sdkmcp.CallToolResult{
+			Content: []sdkmcp.Content{&sdkmcp.TextContent{Text: string(b)}},
+		}, nil
+	})
+}
+

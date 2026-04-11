@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -12,16 +13,21 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/jimyag/sys-mcp/api/tunnel"
+	center "github.com/jimyag/sys-mcp/internal/sys-mcp-center"
 	centercfg "github.com/jimyag/sys-mcp/internal/sys-mcp-center/config"
-	"github.com/jimyag/sys-mcp/internal/sys-mcp-center"
+	"github.com/jimyag/sys-mcp/internal/sys-mcp-center/ha"
 	centermcp "github.com/jimyag/sys-mcp/internal/sys-mcp-center/mcp"
 	"github.com/jimyag/sys-mcp/internal/sys-mcp-center/registry"
 	"github.com/jimyag/sys-mcp/internal/sys-mcp-center/router"
+	"github.com/jimyag/sys-mcp/internal/sys-mcp-center/store"
+	"github.com/jimyag/sys-mcp/internal/pkg/tlsconf"
 )
 
 var defaultConfigPaths = []string{
@@ -65,13 +71,62 @@ func main() {
 
 	rtr := router.New(cfg.Router.RequestTimeoutSec)
 
+	// PostgreSQL 存储层（可选）
+	var st *store.Store
+	var routerBridge *ha.RouterBridge
+	if cfg.Database.Enable {
+		var stErr error
+		st, stErr = store.New(ctx, cfg.Database.DSN, int32(cfg.Database.MaxConns))
+		if stErr != nil {
+			fmt.Fprintf(os.Stderr, "error: connect to PostgreSQL: %v\n", stErr)
+			os.Exit(1)
+		}
+		defer st.Close()
+		if migrateErr := st.Migrate(ctx); migrateErr != nil {
+			fmt.Fprintf(os.Stderr, "error: database migration: %v\n", migrateErr)
+			os.Exit(1)
+		}
+		logger.Info("PostgreSQL 存储层已启用")
+
+		// 计算 center 实例 ID 和内部地址
+		h, _ := os.Hostname()
+		instanceID := h + cfg.Listen.GRPCAddress
+		internalAddr := cfg.Listen.HTTPAddress // 内部转发使用同一 HTTP 端口
+
+		registrar := ha.NewCenterRegistrar(st, instanceID, internalAddr, logger)
+		if regErr := registrar.Start(ctx); regErr != nil {
+			fmt.Fprintf(os.Stderr, "error: register center instance: %v\n", regErr)
+			os.Exit(1)
+		}
+		routerBridge = ha.NewRouterBridge(st, instanceID)
+	}
+
 	tunnelSvc := center.NewTunnelServiceServer(reg, rtr, cfg.Auth.AgentTokens, logger)
 
-	// gRPC server (no TLS for Phase 1 MVP; add later via cfg.Listen.TLS).
-	grpcServer := grpc.NewServer(grpc.Creds(insecure.NewCredentials()))
+	// gRPC server — TLS if cert/key configured, else insecure.
+	var grpcCreds grpc.ServerOption
+	tlsCfg := cfg.Listen.TLS
+	if tlsCfg.CertFile != "" && tlsCfg.KeyFile != "" {
+		serverTLS, err := tlsconf.LoadServerTLS(tlsCfg.CertFile, tlsCfg.KeyFile, tlsCfg.CAFile)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: load TLS: %v\n", err)
+			os.Exit(1)
+		}
+		grpcCreds = grpc.Creds(credentials.NewTLS(serverTLS))
+		logger.Info("TLS enabled", "cert", tlsCfg.CertFile)
+	} else {
+		grpcCreds = grpc.Creds(insecure.NewCredentials())
+		logger.Warn("TLS disabled — running in insecure mode")
+	}
+	grpcServer := grpc.NewServer(grpcCreds)
 	tunnel.RegisterTunnelServiceServer(grpcServer, tunnelSvc)
 
 	mcpHandler := centermcp.NewMCPHandler(reg, rtr, cfg.Auth.ClientTokens)
+
+	// HTTP 路由：/internal/forward 用于跨 center 实例转发，其余走 MCP handler
+	httpMux := http.NewServeMux()
+	httpMux.HandleFunc("/internal/forward", makeInternalForwardHandler(reg, rtr, logger))
+	httpMux.Handle("/", mcpHandler)
 
 	g, gCtx := errgroup.WithContext(ctx)
 
@@ -91,7 +146,7 @@ func main() {
 	g.Go(func() error {
 		httpSrv := &http.Server{
 			Addr:    cfg.Listen.HTTPAddress,
-			Handler: mcpHandler,
+			Handler: httpMux,
 		}
 		logger.Info("HTTP/MCP server listening", "address", cfg.Listen.HTTPAddress)
 		go func() {
@@ -100,11 +155,43 @@ func main() {
 			defer cancel()
 			_ = httpSrv.Shutdown(shutCtx)
 		}()
-		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			return fmt.Errorf("HTTP server: %w", err)
+		if tlsCfg.CertFile != "" && tlsCfg.KeyFile != "" {
+			if err := httpSrv.ListenAndServeTLS(tlsCfg.CertFile, tlsCfg.KeyFile); err != nil && err != http.ErrServerClosed {
+				return fmt.Errorf("HTTPS server: %w", err)
+			}
+		} else {
+			if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				return fmt.Errorf("HTTP server: %w", err)
+			}
 		}
 		return nil
 	})
+
+	// Prometheus metrics 端点（可选，独立端口）
+	if cfg.Metrics.Enable {
+		g.Go(func() error {
+			metricsMux := http.NewServeMux()
+			metricsMux.Handle("/metrics", promhttp.Handler())
+			metricsSrv := &http.Server{
+				Addr:    cfg.Metrics.Address,
+				Handler: metricsMux,
+			}
+			logger.Info("Prometheus metrics server listening", "address", cfg.Metrics.Address)
+			go func() {
+				<-gCtx.Done()
+				shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				_ = metricsSrv.Shutdown(shutCtx)
+			}()
+			if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				return fmt.Errorf("metrics server: %w", err)
+			}
+			return nil
+		})
+	}
+
+	// 确保 routerBridge 的引用被使用（避免 unused variable 错误）
+	_ = routerBridge
 
 	if err := g.Wait(); err != nil && err != context.Canceled {
 		logger.Error("center exited with error", "error", err)
@@ -122,5 +209,37 @@ func parseLogLevel(level string) slog.Level {
 		return slog.LevelError
 	default:
 		return slog.LevelInfo
+	}
+}
+
+// makeInternalForwardHandler 创建内部工具转发 HTTP 处理器。
+// 其他 center 实例通过 POST /internal/forward 将工具请求转发到本实例。
+func makeInternalForwardHandler(reg *registry.Registry, rtr *router.Router, logger *slog.Logger) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req ha.ForwardRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		rec := reg.Lookup(req.TargetHost)
+		if rec == nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(ha.ForwardResponse{Error: fmt.Sprintf("agent %q not found", req.TargetHost)})
+			return
+		}
+
+		result, err := rtr.Send(r.Context(), rec, req.RequestID, req.ToolName, req.ArgsJSON)
+		w.Header().Set("Content-Type", "application/json")
+		if err != nil {
+			json.NewEncoder(w).Encode(ha.ForwardResponse{Error: err.Error()})
+			return
+		}
+		json.NewEncoder(w).Encode(ha.ForwardResponse{ResultJSON: result})
+		logger.Debug("内部转发完成", "target", req.TargetHost, "tool", req.ToolName)
 	}
 }
