@@ -94,6 +94,11 @@ func ReadFile(ctx context.Context, guard *PathGuard, maxFileSizeMB int64, argsJS
 	scanner := bufio.NewScanner(f)
 	truncated := false
 	for scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+		}
 		lines = append(lines, scanner.Text())
 		if p.Head > 0 && len(lines) >= p.Head {
 			truncated = true

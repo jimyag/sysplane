@@ -76,6 +76,11 @@ type HA struct {
 	// InternalSecret 是实例间 /internal/forward 调用的共享密钥。
 	// 若为空则不启用 internal endpoint 鉴权（仅适用于受信任内网）。
 	InternalSecret string `yaml:"internal_secret"`
+	// InternalUseTLS 为 true 时，内部转发使用 https://；否则使用 http://。
+	// 应与 center 实例自身 TLS 配置保持一致。
+	InternalUseTLS bool `yaml:"internal_use_tls"`
+	// InternalSkipVerify 为 true 时跳过内部转发的 TLS 证书验证（适用于自签名证书）。
+	InternalSkipVerify bool `yaml:"internal_skip_verify"`
 }
 
 // Load reads the YAML file at path and returns a validated CenterConfig.

@@ -129,12 +129,13 @@ func (a *Agent) dispatch(msg *tunnel.TunnelMessage) {
 	if req == nil {
 		return
 	}
-	go func() {
-		timeout := time.Duration(a.cfg.ToolTimeoutSec) * time.Second
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 
-		// 注册 cancel 函数供 CancelRequest 触发
-		a.cancelFns.Store(req.RequestId, cancel)
+	// 在 goroutine 启动前注册 cancel 函数，防止 CancelRequest 在 goroutine 调度前到达时丢失取消操作。
+	timeout := time.Duration(a.cfg.ToolTimeoutSec) * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	a.cancelFns.Store(req.RequestId, cancel)
+
+	go func() {
 		defer func() {
 			cancel()
 			a.cancelFns.Delete(req.RequestId)

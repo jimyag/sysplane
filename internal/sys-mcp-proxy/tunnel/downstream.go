@@ -230,7 +230,14 @@ func (s *DownstreamService) DeliverCancelRequest(msg *tunnel.TunnelMessage) {
 
 // ReregisterAll forwards a RegisterRequest upstream for every currently online agent.
 // Called after the upstream connection is re-established.
+// pendingRequests is cleared first because all in-flight requests from the previous
+// connection are now stale — the upstream will have already timed them out.
 func (s *DownstreamService) ReregisterAll(ctx context.Context) {
+	// 清除旧连接遗留的 pending 记录，防止内存泄漏
+	s.pendingRequests.Range(func(k, _ any) bool {
+		s.pendingRequests.Delete(k)
+		return true
+	})
 	for _, rec := range s.reg.All() {
 		if rec.Status != registry.StatusOnline {
 			continue

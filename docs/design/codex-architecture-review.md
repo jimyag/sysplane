@@ -1,349 +1,96 @@
-# sys-mcp 架构设计 Review
+# sys-mcp 当前代码实现复审
 
 ## 范围说明
 
-本 review 基于当前仓库中的设计文档：
-
-- `docs/design/overview.md`
-- `docs/design/sys-mcp-center.md`
-- `docs/design/sys-mcp-proxy.md`
-- `docs/design/sys-mcp-agent.md`
-- `docs/design/sys-mcp-client.md`
-
-当前仓库尚无实现代码，因此本文审查的是设计本身的合理性、完整性与可落地性，不代表实际运行结果。
-
----
-
-## 结论概览
-
-整体方向是合理的：
-
-- 组件职责大体清晰，`agent / proxy / center / client` 的拆分克制
-- 数据面主动建连、默认只读、MCP 与内部隧道解耦，这几个原则是对的
-- 以 center 作为唯一 MCP 入口，也有利于后续做统一鉴权、审计和治理
-
-但当前设计仍偏“文档级可讲通”，距离“生产可运行”还有几处关键缺口。主要问题集中在：
-
-1. HA 所有权与路由一致性不够严谨
-2. proxy 与 agent 的角色建模混杂
-3. 超时与执行预算互相冲突
-4. 批量协议与背压机制不完整
-5. 安全与审计模型还缺少关键约束
-
----
-
-## P0 问题
-
-### 1. center 的 owner 模型不够稳，存在 split-brain 风险
-
-当前设计依赖以下组合来实现高可用：
-
-- PostgreSQL 中记录 `owner_center_id`
-- 本地内存保存 `RouteStream`
-- 重复注册时采用 Last-Write-Wins
-- 新 owner 异步通知旧 owner 关闭 stream
-
-这个模型在 happy path 下能工作，但在真实故障下不够稳：
-
-- 旧 stream 未及时关闭时，两个 center 可能都认为自己能处理该 agent
-- PostgreSQL 更新、stream 断开、心跳超时三者之间没有统一代际语义
-- 路由查到的 `owner_center_id` 可能已经落后于真实连接状态
-
-直接结果是：
-
-- 请求可能被转发到错误 center
-- center 可能对已失效 stream 继续发请求
-- 注册抢占时可能出现短时间双写或错路由
-
-相关位置：
-
-- [overview.md](/Users/jimyag/src/github/jimyag/sys-mcp/docs/design/overview.md#L105)
-- [overview.md](/Users/jimyag/src/github/jimyag/sys-mcp/docs/design/overview.md#L164)
-- [sys-mcp-center.md](/Users/jimyag/src/github/jimyag/sys-mcp/docs/design/sys-mcp-center.md#L159)
-- [sys-mcp-center.md](/Users/jimyag/src/github/jimyag/sys-mcp/docs/design/sys-mcp-center.md#L317)
-
-建议：
-
-- 给每条连接引入 `stream_id` 或 `generation`
-- 所有心跳、响应、路由决策都绑定当前 generation
-- center 只接受“当前 owner 且 generation 匹配”的响应
-- 把 owner 设计成 lease/fencing 模型，而不是仅靠 Last-Write-Wins
-
-### 2. proxy 和 agent 的建模混在一起，角色边界不干净
-
-proxy 当前被描述为“透明转发层”，但启动后又会把自己作为 `RegisterRequest` 注册到上游。与此同时：
-
-- `agents` 表没有 `node_type`
-- `AgentRecord` 没有区分 proxy / agent
-- `list_agents` 的输出语义仍是 agent 列表
-- 所有 agent 工具依赖 `target_hosts`
-
-这会带来几个问题：
-
-- center 无法从模型层判断某个 hostname 是否可执行工具
-- proxy hostname 有机会出现在 agent 列表中，污染调用面
-- 后续如果要对 proxy 做单独观测、拓扑展示、路由调试，模型不够用
-
-相关位置：
-
-- [sys-mcp-proxy.md](/Users/jimyag/src/github/jimyag/sys-mcp/docs/design/sys-mcp-proxy.md#L232)
-- [overview.md](/Users/jimyag/src/github/jimyag/sys-mcp/docs/design/overview.md#L141)
-- [README.md](/Users/jimyag/src/github/jimyag/sys-mcp/docs/design/README.md#L177)
-
-建议：
-
-- 至少给注册表增加 `node_type=agent|proxy`
-- 更稳妥的做法是拆分 `agents` 与 `proxy_instances`
-- `list_agents` 只返回可执行工具的终端节点
-- 如需展示拓扑，单独提供 `list_topology` 或 `list_nodes`
-
-### 3. 请求超时与执行时间预算设计互相冲突
-
-当前文档里：
-
-- center 默认超时 5 秒
-- agent handler 允许执行 25 秒，并声称“留 5 秒给网络传输”
-- `search_file_content` 又给出了 1GB 文件搜索目标
-
-这三者无法同时成立。
-
-如果 center 5 秒就超时：
-
-- agent 侧大量正常执行会被 center 误判为失败
-- proxy pending 会积压
-- AI 看到的结果会高度不稳定
-
-相关位置：
-
-- [sys-mcp-center.md](/Users/jimyag/src/github/jimyag/sys-mcp/docs/design/sys-mcp-center.md#L337)
-- [overview.md](/Users/jimyag/src/github/jimyag/sys-mcp/docs/design/overview.md#L467)
-- [sys-mcp-agent.md](/Users/jimyag/src/github/jimyag/sys-mcp/docs/design/sys-mcp-agent.md#L242)
-- [sys-mcp-agent.md](/Users/jimyag/src/github/jimyag/sys-mcp/docs/design/sys-mcp-agent.md#L278)
-
-建议：
-
-- 统一定义端到端 deadline，而不是每层各自估算
-- 超时按工具分类，不要全局固定 5 秒
-- 至少区分“轻量查询”和“重型文件扫描”
-- center 超时后要定义取消语义，确保下游任务能尽快停止
-
-### 4. 批量注册协议不完整，无法表达部分成功
-
-现在 proto 里有：
-
-- `BatchRegisterRequest`
-
-但没有：
-
-- `BatchRegisterAck`
-- 单条注册结果
-- 部分成功时的重试语义
-
-而 proxy 文档又要求批量注册后“等待 ACK 并批量回复”。这说明协议层和流程层还没对齐。
-
-相关位置：
-
-- [overview.md](/Users/jimyag/src/github/jimyag/sys-mcp/docs/design/overview.md#L241)
-- [overview.md](/Users/jimyag/src/github/jimyag/sys-mcp/docs/design/overview.md#L278)
-- [sys-mcp-proxy.md](/Users/jimyag/src/github/jimyag/sys-mcp/docs/design/sys-mcp-proxy.md#L183)
-
-建议：
-
-- 明确增加 `BatchRegisterAck`
-- 返回每个 hostname 的注册结果
-- 约定幂等键和失败重试规则
-- 明确 center 对 batch 的原子性要求，是“全成全败”还是“逐项处理”
-
----
-
-## P1 问题
-
-### 5. 多机并发模型缺少背压、配额和结果收敛约束
-
-`SendMulti` 当前按 host 开 goroutine，再按 owner center 并发转发，方向对，但少了运行时治理：
-
-- 没有单请求最大 `target_hosts`
-- 没有每个 token 的并发上限
-- 没有 center 本地 worker pool
-- 没有单 agent 并发限制
-- 没有响应体大小限制
-
-此外，示例代码里远端分支在 `results` 已返回时，如果 `err != nil` 还会对同一批 host 再追加 error，存在重复结果风险。这说明“部分成功 + 聚合失败”的模型还没完全想清楚。
-
-相关位置：
-
-- [sys-mcp-center.md](/Users/jimyag/src/github/jimyag/sys-mcp/docs/design/sys-mcp-center.md#L394)
-- [sys-mcp-center.md](/Users/jimyag/src/github/jimyag/sys-mcp/docs/design/sys-mcp-center.md#L457)
-
-建议：
-
-- 给 `SendMulti` 增加显式并发上限
-- 限制 `target_hosts` 数量
-- 定义聚合语义，保证每个 host 最多返回一条结果
-- 给 center 增加 per-token 和全局限流
-
-### 6. 安全模型缺少“身份绑定”这一层
-
-当前设计有：
-
-- gRPC 侧 mTLS
-- 注册 token
-- HTTP 侧 Bearer Token
-
-但没有定义：
-
-- 证书身份与注册 hostname 如何绑定
-- proxy 证书如何和 proxy hostname 绑定
-- center 内部转发的实例身份如何校验
-
-如果没有身份绑定，仅靠“合法证书 + 合法 token”还不够，节点仍可能冒用别的 hostname 抢占注册。
-
-相关位置：
-
-- [overview.md](/Users/jimyag/src/github/jimyag/sys-mcp/docs/design/overview.md#L387)
-- [sys-mcp-agent.md](/Users/jimyag/src/github/jimyag/sys-mcp/docs/design/sys-mcp-agent.md#L359)
-
-建议：
-
-- 校验证书 SAN/CN 与配置中的节点身份一致
-- 注册时 hostname 不应完全信任自报值
-- center 内部 gRPC 也要做双向身份校验，而不是仅“内网可达”
-
-### 7. 文件访问控制还不够严，路径模型偏理想化
-
-当前 `PathGuard` 的设计核心是：
-
-- `filepath.Clean(filepath.Abs(path))`
-- 前缀匹配白名单/黑名单
-
-这不足以覆盖真实文件系统风险：
-
-- symlink 逃逸
-- bind mount / mount boundary
-- hardlink 间接访问
-- Windows 大小写和卷标差异
-
-相关位置：
-
-- [sys-mcp-agent.md](/Users/jimyag/src/github/jimyag/sys-mcp/docs/design/sys-mcp-agent.md#L199)
-
-建议：
-
-- 使用真实路径解析后再做授权判断
-- 明确符号链接策略，是拒绝、跟随，还是仅允许白名单内链接
-- 不要只用字符串前缀做最终判定
-
-### 8. client 设计过于乐观，缺少版本与能力协商策略
-
-当前 client 启动时拉一次工具列表，然后本地透明注册。这个设计很轻，但也比较脆：
-
-- center 工具集变化后，client 是否需要重连刷新，没有定义
-- center / client 使用的 MCP SDK 版本差异如何处理，没有定义
-- transport 失败时本地 stdio server 的可见错误形态也比较粗
-
-相关位置：
-
-- [sys-mcp-client.md](/Users/jimyag/src/github/jimyag/sys-mcp/docs/design/sys-mcp-client.md#L123)
-
-建议：
-
-- 明确工具列表刷新策略
-- 定义 client 与 center 的最低兼容版本
-- 对初始化失败、鉴权失败、中心不可达做一致错误呈现
-
----
-
-## 缺失内容
-
-### 1. 缺少 migration 与 schema versioning 设计
-
-当前 DDL 直接写在文档里，但没有说明：
-
-- 如何做 schema migration
-- center 多实例滚动升级时如何保持兼容
-- 新旧版本字段不一致时如何处理
-
-这对 HA 系统是基础能力，不应后补。
-
-### 2. 缺少取消语义
-
-文档里大量使用 `context`，但没有定义：
-
-- center 超时后是否向 proxy/agent 发取消
-- proxy 如何清理 pending
-- agent 中长时间文件扫描如何及时停掉
-
-如果没有明确取消协议，超时只会变成“调用方超时了，但下游还在继续跑”。
-
-### 3. 缺少降级策略
-
-例如：
-
-- PostgreSQL 不可用时，center 是否还能服务已连接 agent
-- center 内部转发失败时，是否允许回退重查
-- proxy 与上游断连期间，是否接受新注册、如何对外呈现状态
-
-这些决定系统故障时的可用性上限。
-
-### 4. 缺少审计与治理模型
-
-系统本质上在做“AI 驱动的远程读操作平台”，至少应明确：
-
-- 谁调用了哪个工具
-- 目标 host 是什么
-- 访问了哪个路径 / 哪个端口
-- 请求是否成功、耗时多久、返回体大小多大
-- 是否需要对敏感路径做审计增强或脱敏
-
-如果没有这层，后续上线会很难过安全审查。
-
-### 5. 缺少容量规划与上限
-
-文档提到“支持数万台物理机”，但没有配套说明：
-
-- 单 center 最大连接数
-- 单 proxy 扇出能力
-- PostgreSQL QPS 预估
-- 心跳写入规模
-- `list_agents` 和批量调用在大规模下的分页/分片策略
-
-目前“能支撑数万台”还只是目标，不是被设计支撑的结论。
-
----
-
-## 建议的修订优先级
-
-### 第一阶段：先把模型收紧
-
-- 明确 agent / proxy / center 的身份与数据模型
-- 给 owner 模型补 lease/generation/fencing
-- 统一超时与取消语义
-- 补全批量注册协议
-
-### 第二阶段：补运行时治理
-
-- 增加并发上限、配额、背压
-- 定义大批量查询的行为边界
-- 增加降级与故障转移策略
-
-### 第三阶段：补安全与运维闭环
-
-- 证书身份绑定
-- 文件真实路径授权策略
-- 审计日志模型
-- migration / versioning / rollout 策略
-
----
-
-## 最终判断
-
-这套设计的总体拆分方向是对的，也符合“简单、可维护、单一职责”的原则。但目前还存在若干关键缺口，使它更像一份架构草案，而不是可以直接按图施工的生产级设计。
-
-如果后续要进入实现阶段，建议先修订以下四项再开工：
-
-1. owner/route 一致性模型
-2. proxy 与 agent 的角色建模
-3. timeout/cancellation 端到端语义
-4. 批量协议与并发治理
-
-这四项不先收紧，后续实现会很容易在运行时行为上反复返工。
+本次是基于当前仓库代码的二次 review，重点复核上次指出的问题是否真正闭环，并继续找“设计目标”和“当前实现”之间仍然存在的出入。
+
+已确认本轮已修复的点：
+
+- 单机 MCP 工具主路径已经接入 `RouterBridge`
+- `list_agents` 已过滤 `proxy` 节点
+- 工具调用日志已接入单机工具主路径
+- `CancelRequest` 已能从 center 传到 proxy / agent
+- `/internal/forward` 已增加共享密钥校验
+
+下面只保留这轮复审后仍成立的 findings。
+
+## Findings
+
+[P0] PostgreSQL agent 注册表仍未接到真实注册/心跳/下线路径，HA 仍然跑不通 - `cmd/sys-mcp-center/main.go:78`, `internal/sys-mcp-center/store/store.go:74`
+原因:
+- `RouterBridge` 现在已经会查 PostgreSQL 做跨实例转发，但 `agent_instances` 这张表仍然没有在 agent/proxy 注册、心跳、下线时被更新。
+- 当前代码里只有 `tool_call_logs` 被业务主路径使用，`UpsertAgent`、`UpdateAgentHeartbeat`、`SetAgentOffline`、`DeleteAgent` 仍然没有接入 `tunnel_svc` 或 offline checker。
+- 这意味着跨实例查路由时，数据库里大概率没有对应 agent 记录，`ForwardIfNeeded()` 仍会直接返回 “not found in database”。
+证据:
+- `cmd/sys-mcp-center/main.go:78-101`
+- `internal/sys-mcp-center/ha/router_bridge.go:24-47`
+- `internal/sys-mcp-center/store/store.go:74-116`
+- `rg` 结果显示上述 4 个 store 方法当前仍只有测试在调用
+建议:
+- 先把 `tunnel_svc.Connect()` 中的注册、心跳、断连注销，和 offline checker 的离线标记全部写入 `store.Store`。
+- 在这条链路没打通前，`center HA 跨实例路由` 仍不能算真正完成。
+
+[P1] 多机工具仍绕过了你刚补上的 HA 和 node_type 约束 - `internal/sys-mcp-center/mcp/server.go:255`
+原因:
+- 单机工具已经接入 `RemoteForwarder`，但 `registerMultiTool()` 还是旧逻辑，没有使用 `fwd`，也没有做日志接入。
+- 当 `target_hosts` 为空时，它会把所有在线节点都塞进 `records`，没有过滤 `NodeType != "agent"`，于是 proxy 节点会重新混入批量调用面。
+- 当显式传入 `target_hosts` 时，也只做 `reg.Lookup()`，不会走跨实例转发，因此多 center 场景下批量调用仍然只覆盖本机内存 registry。
+证据:
+- `internal/sys-mcp-center/mcp/server.go:59-61`
+- `internal/sys-mcp-center/mcp/server.go:255-305`
+- 对比单机工具路径：`internal/sys-mcp-center/mcp/server.go:162-176`
+建议:
+- 把单机工具的过滤/转发策略统一下沉到多机工具，至少保证：
+  1. 只选 `node_type=agent`
+  2. 多 center 场景下能覆盖远端 agent
+  3. 批量路径与单机路径共用一套调用日志和错误语义
+
+[P1] 取消协议虽然打通了，但大多数文件工具并不真正响应 `ctx`，超时后仍可能继续跑 - `internal/sys-mcp-agent/agent.go:118`, `internal/sys-mcp-agent/fileops/readfile.go:39`
+原因:
+- agent 现在已经保存 `request_id -> cancelFn`，收到 `CancelRequest` 也会执行 `cancel()`，这个方向是对的。
+- 但 `read_file`、`list_directory`、`stat_file`、`check_path_exists`、`search_file_content` 的主体逻辑基本都没有检查 `ctx.Done()`；`search_file_content` 甚至会先把整文件读入 `allLines` 再做匹配。
+- 结果是：center 超时后虽然协议上发出了取消，但文件类 handler 依旧可能跑到自然结束，取消只停在 context 层，没有落实到执行层。
+证据:
+- `internal/sys-mcp-agent/agent.go:118-164`
+- `internal/sys-mcp-agent/fileops/readfile.go:39-121`
+- `internal/sys-mcp-agent/fileops/readfile.go:125-156`
+- `internal/sys-mcp-agent/fileops/search.go:47-149`
+- `internal/sys-mcp-agent/fileops/listdir.go:31-68`
+- `internal/sys-mcp-agent/fileops/stat.go:29-106`
+建议:
+- 对所有可能遍历文件/目录的循环加入 `select { case <-ctx.Done(): ... }`。
+- `search_file_content` 不要先把整文件读入内存；至少改成流式扫描，并在扫描/匹配循环里尊重 `ctx`。
+
+[P1] 文件访问控制仍然只做字符串前缀判断，symlink 逃逸问题没有解决 - `internal/sys-mcp-agent/fileops/guard.go:17`
+原因:
+- `PathGuard.Check()` 依旧只是 `filepath.Clean()` 后做前缀匹配，没有 `EvalSymlinks()`，也没有在打开文件后校验真实落点。
+- 允许目录内部如果存在指向敏感路径的 symlink，`read_file` 等操作依然可能被绕过到真实目标。
+- 这和项目文档里的“最小权限原则，默认只读，安全优先”仍有明显距离。
+证据:
+- `internal/sys-mcp-agent/fileops/guard.go:17-63`
+- `internal/sys-mcp-agent/fileops/readfile.go:44-60`
+- `internal/sys-mcp-agent/fileops/search.go:53-77`
+建议:
+- 在授权判断时引入真实路径解析，并明确 symlink 策略。
+- 如果暂时不想支持 symlink，最简单的生产友好做法是直接拒绝访问最终落点为 symlink 的路径。
+
+[P1] 内部转发仍固定走明文 HTTP，和 center 已有 TLS 配置不一致 - `internal/sys-mcp-center/ha/forwarder.go:48`
+原因:
+- `/internal/forward` 现在有共享密钥，这比上次好很多；但发起方 URL 仍然被硬编码成 `http://`。
+- 同一个 center 进程明明已经支持 `ListenAndServeTLS()`，但实例间转发不会跟随 TLS 配置，等于把 HA 通道单独降级成明文。
+- 在设计目标里，中心服务是统一控制面，这条内部通道继续明文会让实际部署边界和文档不一致。
+证据:
+- `cmd/sys-mcp-center/main.go:151-171`
+- `internal/sys-mcp-center/ha/forwarder.go:48-58`
+建议:
+- 至少让内部转发根据配置决定 `http` / `https`。
+- 更彻底的做法还是把内部转发切回独立的内部 gRPC 通道，而不是复用外部 HTTP 监听。
+
+## Open Questions
+
+- 你现在是否明确只想先支持“单 center + 远期 HA 预埋”，还是已经希望这套代码能直接支撑多 center 实际部署？这会影响上面第一个 P0 的优先级。
+- 多机工具是否有意只做“本实例 fan-out”，还是原本就想和单机工具一样具备跨实例能力？当前代码和设计文档在这点上还没有完全对齐。
+
+## Summary
+
+这轮和上轮相比，确实已经修掉了几条关键缺口，方向是对的。但剩下的核心问题也更明确了：HA 的“调用路径”接上了，`agent_instances` 这个“状态源”还没接上；取消协议接上了，具体文件 handler 还不真正响应取消；单机工具修正了 node_type/HA，多机工具还停在旧逻辑。下一步最值得优先补的是：数据库注册表落地、多机工具语义对齐、文件工具真正尊重 `ctx`。

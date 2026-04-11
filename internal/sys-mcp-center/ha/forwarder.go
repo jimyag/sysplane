@@ -3,6 +3,7 @@ package ha
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,11 +13,22 @@ import (
 
 // internalHTTPClient is a dedicated HTTP client for inter-instance calls.
 // Avoids sharing http.DefaultClient and sets sane limits.
+// No client-level Timeout is set here — every call uses context.WithTimeout(30s),
+// so a separate client Timeout would never fire and would only cause confusion.
 var internalHTTPClient = &http.Client{
-	Timeout: 35 * time.Second,
 	Transport: &http.Transport{
 		MaxIdleConnsPerHost: 4,
 		IdleConnTimeout:     60 * time.Second,
+	},
+}
+
+// internalHTTPClientTLSSkipVerify is used for internal forwarding when TLS is enabled
+// but certificate verification should be skipped (e.g., self-signed certs).
+var internalHTTPClientTLSSkipVerify = &http.Client{
+	Transport: &http.Transport{
+		MaxIdleConnsPerHost: 4,
+		IdleConnTimeout:     60 * time.Second,
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // intentional for internal traffic
 	},
 }
 
@@ -39,14 +51,21 @@ type ForwardResponse struct {
 
 // ForwardToCenter 将工具请求 HTTP POST 到指定 center 实例的 /internal/forward 端点。
 // secret 是共享密钥，与接收方 config.HA.InternalSecret 一致。
-func ForwardToCenter(ctx context.Context, internalAddress, secret string, req ForwardRequest) (string, error) {
+// useTLS 为 true 时使用 https://，否则使用 http://。
+// skipVerify 为 true 时跳过 TLS 证书验证（适用于自签名证书）。
+func ForwardToCenter(ctx context.Context, internalAddress, secret string, req ForwardRequest, useTLS, skipVerify bool) (string, error) {
 	body, _ := json.Marshal(req)
+
+	scheme := "http"
+	if useTLS {
+		scheme = "https"
+	}
 
 	httpCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
 	httpReq, err := http.NewRequestWithContext(httpCtx, http.MethodPost,
-		"http://"+internalAddress+"/internal/forward",
+		scheme+"://"+internalAddress+"/internal/forward",
 		bytes.NewReader(body),
 	)
 	if err != nil {
@@ -57,7 +76,12 @@ func ForwardToCenter(ctx context.Context, internalAddress, secret string, req Fo
 		httpReq.Header.Set(internalAuthHeader, secret)
 	}
 
-	resp, err := internalHTTPClient.Do(httpReq)
+	client := internalHTTPClient
+	if useTLS && skipVerify {
+		client = internalHTTPClientTLSSkipVerify
+	}
+
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		return "", fmt.Errorf("ha: forward request: %w", err)
 	}

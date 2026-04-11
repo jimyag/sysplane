@@ -2,6 +2,7 @@
 package center
 
 import (
+	"context"
 	"log/slog"
 	"strings"
 	"time"
@@ -13,7 +14,16 @@ import (
 	pkgstream "github.com/jimyag/sys-mcp/internal/pkg/stream"
 	"github.com/jimyag/sys-mcp/internal/sys-mcp-center/registry"
 	"github.com/jimyag/sys-mcp/internal/sys-mcp-center/router"
+	"github.com/jimyag/sys-mcp/internal/sys-mcp-center/store"
 )
+
+// AgentPersister 是 PG 写入的可选接口。
+// store.Store 实现此接口；若数据库未启用则传 nil。
+type AgentPersister interface {
+	UpsertAgent(ctx context.Context, r *store.AgentRow) error
+	UpdateAgentHeartbeat(ctx context.Context, hostname string) error
+	SetAgentOffline(ctx context.Context, hostname string) error
+}
 
 // TunnelServiceServer implements the gRPC TunnelService for center.
 type TunnelServiceServer struct {
@@ -22,15 +32,20 @@ type TunnelServiceServer struct {
 	router      *router.Router
 	agentTokens []string
 	logger      *slog.Logger
+	persister   AgentPersister // optional; nil if database is disabled
+	instanceID  string         // center instance ID for PG writes
 }
 
 // NewTunnelServiceServer creates a TunnelServiceServer.
-func NewTunnelServiceServer(reg *registry.Registry, rtr *router.Router, agentTokens []string, logger *slog.Logger) *TunnelServiceServer {
+// persister and instanceID are optional; pass nil/"" to disable PG writes.
+func NewTunnelServiceServer(reg *registry.Registry, rtr *router.Router, agentTokens []string, logger *slog.Logger, persister AgentPersister, instanceID string) *TunnelServiceServer {
 	return &TunnelServiceServer{
 		reg:         reg,
 		router:      rtr,
 		agentTokens: agentTokens,
 		logger:      logger,
+		persister:   persister,
+		instanceID:  instanceID,
 	}
 }
 
@@ -79,6 +94,28 @@ func (s *TunnelServiceServer) Connect(srv tunnel.TunnelService_ConnectServer) er
 	s.reg.Register(rec)
 	s.logger.Info("agent registered", "hostname", req.Hostname, "type", nodeType, "ip", req.Ip)
 
+	// Persist to PostgreSQL asynchronously (non-blocking; DB unavailability must not block gRPC).
+	if s.persister != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := s.persister.UpsertAgent(ctx, &store.AgentRow{
+				Hostname:      req.Hostname,
+				IP:            req.Ip,
+				OS:            req.Os,
+				AgentVersion:  req.AgentVersion,
+				NodeType:      nodeType,
+				ProxyPath:     req.ProxyPath,
+				CenterID:      s.instanceID,
+				Status:        "online",
+				RegisteredAt:  rec.RegisteredAt,
+				LastHeartbeat: rec.LastHeartbeat,
+			}); err != nil {
+				s.logger.Warn("UpsertAgent failed", "hostname", req.Hostname, "error", err)
+			}
+		}()
+	}
+
 	// Send ack.
 	if err := ts.Send(&tunnel.TunnelMessage{
 		Payload: &tunnel.TunnelMessage_RegisterAck{
@@ -93,6 +130,15 @@ func (s *TunnelServiceServer) Connect(srv tunnel.TunnelService_ConnectServer) er
 		removed := s.reg.UnregisterByStream(ts)
 		for _, h := range removed {
 			s.logger.Info("agent unregistered", "hostname", h)
+			if s.persister != nil {
+				go func(hostname string) {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					if err := s.persister.SetAgentOffline(ctx, hostname); err != nil {
+						s.logger.Warn("SetAgentOffline failed", "hostname", hostname, "error", err)
+					}
+				}(h)
+			}
 		}
 	}()
 
@@ -112,6 +158,15 @@ func (s *TunnelServiceServer) Connect(srv tunnel.TunnelService_ConnectServer) er
 					},
 				},
 			})
+			if s.persister != nil {
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					if err := s.persister.UpdateAgentHeartbeat(ctx, req.Hostname); err != nil {
+						s.logger.Debug("UpdateAgentHeartbeat failed", "hostname", req.Hostname, "error", err)
+					}
+				}()
+			}
 		case *tunnel.TunnelMessage_ToolResponse:
 			s.router.DeliverFromMessage(msg)
 		case *tunnel.TunnelMessage_ErrorResponse:
@@ -124,11 +179,21 @@ func (s *TunnelServiceServer) Connect(srv tunnel.TunnelService_ConnectServer) er
 				s.reg.UpdateHeartbeat(hostname)
 				s.logger.Debug("proxy-forwarded heartbeat received",
 					"hostname", hostname, "via_proxy", req.Hostname)
+				if s.persister != nil {
+					go func(h string) {
+						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+						defer cancel()
+						if err := s.persister.UpdateAgentHeartbeat(ctx, h); err != nil {
+							s.logger.Debug("UpdateAgentHeartbeat (proxy) failed", "hostname", h, "error", err)
+						}
+					}(hostname)
+				}
 			} else {
 				downstreamNodeType := "agent"
 				if p.RegisterRequest.NodeType == tunnel.NodeType_NODE_TYPE_PROXY {
 					downstreamNodeType = "proxy"
 				}
+				now := time.Now()
 				downstreamRec := &registry.AgentRecord{
 					Hostname:      hostname,
 					IP:            p.RegisterRequest.Ip,
@@ -136,8 +201,8 @@ func (s *TunnelServiceServer) Connect(srv tunnel.TunnelService_ConnectServer) er
 					AgentVersion:  p.RegisterRequest.AgentVersion,
 					NodeType:      downstreamNodeType,
 					ProxyPath:     p.RegisterRequest.ProxyPath,
-					RegisteredAt:  time.Now(),
-					LastHeartbeat: time.Now(),
+					RegisteredAt:  now,
+					LastHeartbeat: now,
 					Status:        registry.StatusOnline,
 					RouteStream:   ts, // route via the proxy's stream
 				}
@@ -146,6 +211,26 @@ func (s *TunnelServiceServer) Connect(srv tunnel.TunnelService_ConnectServer) er
 					"hostname", hostname,
 					"via_proxy", req.Hostname,
 				)
+				if s.persister != nil {
+					go func(r *registry.AgentRecord) {
+						ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+						defer cancel()
+						if err := s.persister.UpsertAgent(ctx, &store.AgentRow{
+							Hostname:      r.Hostname,
+							IP:            r.IP,
+							OS:            r.OS,
+							AgentVersion:  r.AgentVersion,
+							NodeType:      r.NodeType,
+							ProxyPath:     r.ProxyPath,
+							CenterID:      s.instanceID,
+							Status:        "online",
+							RegisteredAt:  r.RegisteredAt,
+							LastHeartbeat: r.LastHeartbeat,
+						}); err != nil {
+							s.logger.Warn("UpsertAgent (proxy) failed", "hostname", r.Hostname, "error", err)
+						}
+					}(downstreamRec)
+				}
 			}
 		}
 	}

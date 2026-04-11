@@ -67,7 +67,9 @@ func main() {
 	defer stop()
 
 	reg := registry.New()
-	reg.StartOfflineChecker(ctx, 90*time.Second)
+
+	// 若数据库启用，offline checker 写回 PG
+	var pgOfflineCallback func(context.Context, string)
 
 	rtr := router.New(cfg.Router.RequestTimeoutSec)
 
@@ -92,16 +94,36 @@ func main() {
 		}
 		logger.Info("PostgreSQL 存储层已启用")
 
+		pgOfflineCallback = func(cbCtx context.Context, hostname string) {
+			offCtx, cancel := context.WithTimeout(cbCtx, 5*time.Second)
+			defer cancel()
+			if err := st.SetAgentOffline(offCtx, hostname); err != nil {
+				logger.Warn("SetAgentOffline (offline checker) failed", "hostname", hostname, "error", err)
+			}
+		}
+
 		internalAddr := cfg.Listen.HTTPAddress // 内部转发使用同一 HTTP 端口
 		registrar := ha.NewCenterRegistrar(st, instanceID, internalAddr, logger)
 		if regErr := registrar.Start(ctx); regErr != nil {
 			fmt.Fprintf(os.Stderr, "error: register center instance: %v\n", regErr)
 			os.Exit(1)
 		}
-		routerBridge = ha.NewRouterBridge(st, instanceID, cfg.HA.InternalSecret)
+		routerBridge = ha.NewRouterBridge(st, instanceID, cfg.HA.InternalSecret, cfg.HA.InternalUseTLS, cfg.HA.InternalSkipVerify)
 	}
 
-	tunnelSvc := center.NewTunnelServiceServer(reg, rtr, cfg.Auth.AgentTokens, logger)
+	if pgOfflineCallback != nil {
+		reg.StartOfflineChecker(ctx, 90*time.Second, pgOfflineCallback)
+	} else {
+		reg.StartOfflineChecker(ctx, 90*time.Second)
+	}
+
+	// 可选 AgentPersister（store.Store 实现了该接口）
+	var persister center.AgentPersister
+	if st != nil {
+		persister = st
+	}
+
+	tunnelSvc := center.NewTunnelServiceServer(reg, rtr, cfg.Auth.AgentTokens, logger, persister, instanceID)
 
 	// gRPC server — TLS if cert/key configured, else insecure.
 	var grpcCreds grpc.ServerOption

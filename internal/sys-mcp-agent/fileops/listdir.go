@@ -48,6 +48,11 @@ func ListDirectory(ctx context.Context, guard *PathGuard, argsJSON string) (stri
 
 	items := make([]FileEntry, 0, len(entries))
 	for _, e := range entries {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+		}
 		if !p.ShowHidden && len(e.Name()) > 0 && e.Name()[0] == '.' {
 			continue
 		}

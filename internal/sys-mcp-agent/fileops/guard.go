@@ -37,6 +37,14 @@ func NewPathGuard(allowed, blocked []string) *PathGuard {
 // Check returns nil if path is accessible, or an error if it is denied.
 func (g *PathGuard) Check(path string) error {
 	cleaned := filepath.Clean(path)
+
+	// Resolve symlinks so that a symlink pointing outside the allowed tree
+	// cannot be used to escape the guard. EvalSymlinks fails for non-existent
+	// paths (pre-creation checks), so fall back to the cleaned path in that case.
+	if real, err := filepath.EvalSymlinks(cleaned); err == nil {
+		cleaned = real
+	}
+
 	// Ensure we compare with separator to prevent prefix attacks like /proc2.
 	candidate := cleaned
 	if !strings.HasSuffix(candidate, string(filepath.Separator)) {

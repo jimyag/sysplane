@@ -13,11 +13,19 @@ type RouterBridge struct {
 	store      *store.Store
 	instanceID string // 当前 center 实例 ID（本机不需要转发）
 	secret     string // ha.internal_secret，传递给 ForwardToCenter
+	useTLS     bool   // ha.internal_use_tls，内部转发是否使用 https
+	skipVerify bool   // ha.internal_skip_verify，跳过 TLS 证书验证
 }
 
 // NewRouterBridge 创建跨实例路由桥。
-func NewRouterBridge(st *store.Store, instanceID, secret string) *RouterBridge {
-	return &RouterBridge{store: st, instanceID: instanceID, secret: secret}
+func NewRouterBridge(st *store.Store, instanceID, secret string, useTLS, skipVerify bool) *RouterBridge {
+	return &RouterBridge{
+		store:      st,
+		instanceID: instanceID,
+		secret:     secret,
+		useTLS:     useTLS,
+		skipVerify: skipVerify,
+	}
 }
 
 // ForwardIfNeeded 查询 PG 找到 targetHost 所在的 center 实例，然后转发工具请求。
@@ -45,7 +53,7 @@ func (b *RouterBridge) ForwardIfNeeded(ctx context.Context, requestID, targetHos
 		ToolName:   toolName,
 		ArgsJSON:   argsJSON,
 		TargetHost: targetHost,
-	})
+	}, b.useTLS, b.skipVerify)
 	if err != nil {
 		return "", true, err
 	}

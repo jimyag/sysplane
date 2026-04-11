@@ -73,6 +73,9 @@ type AgentRow struct {
 
 // UpsertAgent 插入或更新 agent 记录。
 func (s *Store) UpsertAgent(ctx context.Context, r *AgentRow) error {
+	if r.ProxyPath == nil {
+		r.ProxyPath = []string{}
+	}
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO agent_instances
 			(hostname, ip, os, agent_version, node_type, proxy_path, center_id, status, registered_at, last_heartbeat)

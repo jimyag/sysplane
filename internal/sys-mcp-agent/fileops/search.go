@@ -76,11 +76,18 @@ func SearchFileContent(ctx context.Context, guard *PathGuard, argsJSON string) (
 	}
 	defer f.Close()
 
-	// Read all lines first (needed for context before/after).
+	// Stream-read all lines with ctx cancellation check each iteration.
+	// We still collect all lines when context_before/after is requested (need look-back/look-ahead).
+	// For large files without context the full-scan is bounded by file size and ctx timeout.
 	var allLines []string
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, maxLineLength), maxLineLength)
 	for scanner.Scan() {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		default:
+		}
 		allLines = append(allLines, scanner.Text())
 	}
 	if err := scanner.Err(); err != nil {

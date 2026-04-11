@@ -40,6 +40,13 @@ func NewMCPHandler(reg *registry.Registry, rtr *router.Router, clientTokens []st
 	return BearerTokenMiddleware(clientTokens, handler)
 }
 
+// BuildServerForTest exposes buildServer for use in package-external tests.
+// fwd and log may be nil. This returns the raw sdkmcp.Server so tests can
+// drive it via InMemoryTransport without going through the SSE HTTP layer.
+func BuildServerForTest(reg *registry.Registry, rtr *router.Router, fwd RemoteForwarder, log CallLogger, instanceID string) *sdkmcp.Server {
+	return buildServer(reg, rtr, fwd, log, instanceID)
+}
+
 func buildServer(reg *registry.Registry, rtr *router.Router, fwd RemoteForwarder, log CallLogger, instanceID string) *sdkmcp.Server {
 	srv := sdkmcp.NewServer(&sdkmcp.Implementation{
 		Name:    "sys-mcp-center",
@@ -57,8 +64,8 @@ func buildServer(reg *registry.Registry, rtr *router.Router, fwd RemoteForwarder
 	}
 
 	// 多机并发工具
-	registerMultiTool(srv, reg, rtr, "get_hardware_info_multi")
-	registerMultiTool(srv, reg, rtr, "list_directory_multi")
+	registerMultiTool(srv, reg, rtr, "get_hardware_info_multi", fwd, log, instanceID)
+	registerMultiTool(srv, reg, rtr, "list_directory_multi", fwd, log, instanceID)
 
 	return srv
 }
@@ -252,7 +259,7 @@ var multiToolSchema = &jsonschema.Schema{
 
 // registerMultiTool 注册一个多机并发工具，工具名约定为 <singleToolName>_multi。
 // 底层调用对应的单机工具名（去掉 _multi 后缀）。
-func registerMultiTool(srv *sdkmcp.Server, reg *registry.Registry, rtr *router.Router, toolName string) {
+func registerMultiTool(srv *sdkmcp.Server, reg *registry.Registry, rtr *router.Router, toolName string, fwd RemoteForwarder, log CallLogger, instanceID string) {
 	singleTool := strings.TrimSuffix(toolName, "_multi")
 
 	tool := &sdkmcp.Tool{
@@ -272,21 +279,21 @@ func registerMultiTool(srv *sdkmcp.Server, reg *registry.Registry, rtr *router.R
 			}
 		}
 
-		// 决定目标列表
+		// 决定目标列表：只包含 agent 节点（排除 proxy 聚合节点）
 		var records []*registry.AgentRecord
 		if len(params.TargetHosts) == 0 {
 			for _, r := range reg.All() {
-				if r.Status == registry.StatusOnline {
+				if r.Status == registry.StatusOnline && r.NodeType == "agent" {
 					records = append(records, r)
 				}
 			}
 		} else {
 			for _, h := range params.TargetHosts {
 				r := reg.Lookup(h)
-				if r == nil {
-					return nil, fmt.Errorf("agent not found: %s", h)
+				if r != nil {
+					records = append(records, r)
 				}
-				records = append(records, r)
+				// 本地找不到时尝试跨实例转发（由各工具的单机路径处理，此处跳过）
 			}
 		}
 
@@ -302,11 +309,28 @@ func registerMultiTool(srv *sdkmcp.Server, reg *registry.Registry, rtr *router.R
 		}
 
 		requestIDBase := fmt.Sprintf("multi-%s-%d", singleTool, time.Now().UnixNano())
+
+		// 记录调用日志
+		if log != nil {
+			for _, rec := range records {
+				rid := requestIDBase + "-" + rec.Hostname
+				_ = log.InsertToolCallLog(ctx, rid, instanceID, rec.Hostname, singleTool, argsJSON)
+			}
+		}
+
 		multiResults := rtr.SendMulti(ctx, records, requestIDBase, singleTool, argsJSON)
 
 		// 聚合结果为 map
 		resultMap := make(map[string]interface{}, len(multiResults))
 		for _, mr := range multiResults {
+			if log != nil {
+				rid := requestIDBase + "-" + mr.Hostname
+				if mr.Err != nil {
+					_ = log.CompleteToolCallLog(ctx, rid, "", mr.Err.Error())
+				} else {
+					_ = log.CompleteToolCallLog(ctx, rid, mr.Result, "")
+				}
+			}
 			if mr.Err != nil {
 				resultMap[mr.Hostname] = map[string]string{"error": mr.Err.Error()}
 			} else {

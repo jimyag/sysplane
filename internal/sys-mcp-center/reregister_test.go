@@ -28,7 +28,7 @@ func newTestServer(t *testing.T, tokens []string) (tunnel.TunnelServiceClient, *
 	reg := registry.New()
 	rtr := router.New(5)
 	logger := slog.Default()
-	svc := center.NewTunnelServiceServer(reg, rtr, tokens, logger)
+	svc := center.NewTunnelServiceServer(reg, rtr, tokens, logger, nil, "")
 
 	lis := bufconn.Listen(bufSize)
 	srv := grpc.NewServer()
