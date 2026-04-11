@@ -1,6 +1,8 @@
 # 设计与实现状态对照
 
-本文档对照设计文档，梳理各项功能的当前实现状态，区分已完成、部分实现和尚未实现的内容。
+> 最后更新：2026-04-11
+
+本文档对照设计文档，梳理各项功能的当前实现状态。
 
 ---
 
@@ -42,10 +44,17 @@
 | gRPC TunnelService 服务端 | 完成 | `internal/sys-mcp-center/tunnel_svc.go` |
 | 内存 agent 注册表 | 完成 | `internal/sys-mcp-center/registry/registry.go` |
 | 单机工具路由（单 target_host） | 完成 | `internal/sys-mcp-center/router/router.go` |
-| MCP HTTP/SSE 服务端（8 个工具） | 完成 | `internal/sys-mcp-center/mcp/server.go` |
+| MCP HTTP/SSE 服务端（10 个工具） | 完成 | `internal/sys-mcp-center/mcp/server.go` |
 | Bearer Token 鉴权（HTTP + gRPC） | 完成 | `internal/sys-mcp-center/mcp/auth.go` |
 | proxy 转发注册（downstream agent via proxy） | 完成 | `tunnel_svc.go` 中处理 RegisterRequest 转发 |
 | 流关闭时自动注销 | 完成 | `reg.UnregisterByStream()` 在 Connect 退出时调用 |
+| 心跳超时主动下线检测 | 完成 | `registry.StartOfflineChecker()`，90s 无心跳标记 offline |
+| center gRPC/HTTP TLS | 完成 | `cmd/sys-mcp-center/main.go`，证书为空时自动降级明文 |
+| Prometheus metrics | 完成 | `internal/sys-mcp-center/metrics/`，独立端口暴露 |
+| 多机并发查询 SendMulti | 完成 | `router.SendMulti()`，新增 `get_hardware_info_multi` / `list_directory_multi` |
+| PostgreSQL 持久化注册表 | 完成 | `internal/sys-mcp-center/store/`，三张表 |
+| center HA 自注册/心跳 | 完成 | `internal/sys-mcp-center/ha/registration.go` |
+| center HA 跨实例路由 | 完成 | `internal/sys-mcp-center/ha/router_bridge.go` + `/internal/forward` 端点 |
 
 ### sys-mcp-proxy
 
@@ -54,6 +63,7 @@
 | 下游 gRPC 服务端（接收 agent） | 完成 | `internal/sys-mcp-proxy/tunnel/downstream.go` |
 | 上游连接（连接 center 或上级 proxy） | 完成 | `internal/pkg/stream/dialer.go` |
 | 转发下游 agent 注册到上游 | 完成 | DownstreamService 中的 RegisterRequest 转发 |
+| 心跳转发到上游（防止 center 误判 offline） | 完成 | 收到下游心跳后向 center 发 RegisterRequest 刷新时间戳 |
 | ToolRequest 路由到正确下游 agent | 完成 | `DownstreamService.DeliverToolRequest()` |
 | 上游断线重连后重新注册所有下游 agent | 完成 | `ReregisterAll()` 在 OnRegisterAck 回调中调用 |
 | 多级级联 | 完成 | proxy 的 upstream 可指向另一个 proxy |
@@ -69,53 +79,6 @@
 
 ---
 
-## 部分实现
-
-### TLS
-
-| 功能 | 状态 | 说明 |
-|------|------|------|
-| agent 客户端 mTLS | 完成 | `buildCredentials()` |
-| proxy 客户端 mTLS | 完成 | `DialerConfig.TLSCredentials` |
-| center gRPC 服务端 TLS | 未接入 | `cmd/sys-mcp-center/main.go` 硬编码 `insecure.NewCredentials()`，配置字段存在但未读取 |
-| center HTTP 服务端 TLS | 未接入 | `http.ListenAndServe` 未改为 `ListenAndServeTLS` |
-
-**影响**：生产环境中，center 的 gRPC 和 HTTP 端口应启用 TLS。目前 center 只适合在内网或通过 NGINX/Caddy 等反向代理做 TLS 终止的场景使用。
-
----
-
-## 尚未实现（设计中存在，代码中缺失）
-
-### PostgreSQL 持久化（center 设计第 4、6 节）
-
-设计文档描述了完整的 PostgreSQL 数据模型，包含 `agent_instances`、`tool_call_logs` 等表，用于跨 center 实例共享状态。当前实现为纯内存注册表，center 重启后所有 agent 记录丢失（agent 会自动重连，记录会恢复，但重启期间不可查）。
-
-影响：
-- center 无法做到真正的高可用（多实例）
-- 没有历史调用记录
-
-### center 高可用（HA）多实例路由（center 设计第 4.1、4.3、4.4 节）
-
-设计文档描述了多 center 实例通过 PostgreSQL 或消息队列协调的方案（agent 可以连接到任意 center 实例，跨实例请求通过数据库或内部 gRPC 转发）。当前实现为单实例，无法水平扩展。
-
-影响：center 是单点故障，重启会导致短暂不可用。
-
-### 多机并发查询 SendMulti（center 设计第 8 节）
-
-设计文档描述了 `target_hosts` 数组参数，允许一次工具调用同时查询多台机器并聚合结果。当前实现只支持 `target_host`（单机）。
-
-影响：需要批量查询时，AI 必须多次调用同一工具。
-
-### 可观测性 / Metrics（设计第 9 节）
-
-设计文档规划了 Prometheus 指标（注册 agent 数、工具调用延迟、错误率等）和结构化日志字段。当前实现有基础的 `slog` 结构化日志，但无 metrics 端点。
-
-### 心跳超时主动下线检测
-
-当前实现：center 在收到 Heartbeat 时更新 `LastHeartbeat`，但没有后台 goroutine 定期扫描并将超时 agent 标记为 `StatusOffline`。agent 的 `StatusOffline` 目前只有在 gRPC 流关闭（`UnregisterByStream`）时才会触发，不依赖心跳超时。
-
----
-
 ## 测试覆盖状态
 
 | 测试 | 文件 | 说明 |
@@ -128,18 +91,19 @@
 | 硬件信息采集 | `internal/sys-mcp-agent/collector/hardware_test.go` | 已测试 |
 | 本地 API 代理 | `internal/sys-mcp-agent/apiproxy/proxy_test.go` | 已测试 |
 | TLS 配置加载 | `internal/pkg/tlsconf/tlsconf_test.go` | 已测试 |
-| proxy ReregisterAll | 缺失 | 未测试 |
-| client stdio 桥接 | 缺失 | 未测试 |
-| center MCP 工具注册 | 缺失 | 未测试 |
+| SendMulti 并发路由 | `internal/sys-mcp-center/router/router_test.go` | 已测试 |
+| Prometheus 指标注册 | `internal/sys-mcp-center/metrics/metrics_test.go` | 已测试 |
+| PostgreSQL store | `internal/sys-mcp-center/store/store_test.go` | 已测试（无 PG 时自动跳过） |
+| proxy 编译冒烟测试 | `internal/sys-mcp-proxy/tunnel/downstream_test.go` | 已测试 |
+| E2E 全链路（15 用例） | `/tmp/sys-mcp-test/e2e_test.py` | 15/15 通过 |
 
 ---
 
-## 后续计划
+## 后续可选增强
 
-优先级从高到低：
+以下功能超出当前 MVP 范围，可按需实现：
 
-1. center gRPC/HTTP TLS 接入（低风险，只需读取已有配置字段）
-2. 心跳超时主动下线检测（加一个后台 goroutine，30 行左右）
-3. 多机并发查询 `SendMulti`（需改 proto + router + MCP server）
-4. Prometheus metrics 端点
-5. PostgreSQL 持久化 + center HA（工程量较大，需单独立项）
+1. center `/internal/forward` 端点增加 HMAC 签名校验（当前仅依赖内网信任）
+2. RouterBridge 完整接入 router.Send() 主路径（当前已实例化但未自动触发）
+3. 历史调用日志写入 `tool_call_logs` 表
+4. 客户端 stdio 桥接测试、center MCP 工具注册单元测试
