@@ -10,7 +10,6 @@ import (
 	"syscall"
 
 	agent "github.com/jimyag/sys-mcp/internal/sys-mcp-agent"
-	agentcfg "github.com/jimyag/sys-mcp/internal/sys-mcp-agent/config"
 )
 
 var defaultConfigPaths = []string{
@@ -36,17 +35,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	cfg, err := agentcfg.Load(configPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: load config: %v\n", err)
-		os.Exit(1)
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	a := agent.New(cfg)
-	if err := a.Run(ctx); err != nil && err != context.Canceled {
+	if err := agent.Run(ctx, configPath); err != nil && err != context.Canceled {
 		slog.Error("agent exited with error", "error", err)
 		os.Exit(1)
 	}
