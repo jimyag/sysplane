@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 )
@@ -40,14 +41,24 @@ func New(cfg Config) *Proxy {
 			if err != nil {
 				return nil, fmt.Errorf("apiproxy: resolve %q: %w", host, err)
 			}
+			var firstIP net.IP
 			for _, ip := range ips {
 				parsed := net.ParseIP(ip)
 				if parsed == nil || !parsed.IsLoopback() {
 					return nil, fmt.Errorf("apiproxy: resolved %q to non-loopback IP %s", host, ip)
 				}
+				if firstIP == nil {
+					firstIP = parsed
+				}
 			}
-			// Always connect to loopback.
-			return dialer.DialContext(ctx, network, "127.0.0.1:"+port)
+			// Dial the first resolved loopback address (supports both IPv4 and IPv6).
+			var dialAddr string
+			if firstIP == nil || firstIP.To4() != nil {
+				dialAddr = "127.0.0.1:" + port
+			} else {
+				dialAddr = "[::1]:" + port
+			}
+			return dialer.DialContext(ctx, network, dialAddr)
 		},
 	}
 	return &Proxy{
@@ -147,12 +158,9 @@ func (p *Proxy) checkPort(port int) error {
 		return fmt.Errorf("proxy_local_api: privileged port %d not allowed", port)
 	}
 	if len(p.cfg.AllowedPorts) > 0 {
-		for _, allowed := range p.cfg.AllowedPorts {
-			if port == allowed {
-				return nil
-			}
+		if !slices.Contains(p.cfg.AllowedPorts, port) {
+			return fmt.Errorf("proxy_local_api: port %d not in allowed list", port)
 		}
-		return fmt.Errorf("proxy_local_api: port %d not in allowed list", port)
 	}
 	return nil
 }
