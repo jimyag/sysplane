@@ -13,6 +13,11 @@ import (
 	"github.com/jimyag/sysplane/internal/sysplane-center/registry"
 )
 
+var (
+	ErrTimeout  = errors.New("timeout")
+	ErrCanceled = errors.New("canceled")
+)
+
 type pendingSlot struct {
 	ch chan *tunnel.TunnelMessage
 }
@@ -74,9 +79,9 @@ func (r *Router) Send(ctx context.Context, rec *registry.AgentRecord, requestID,
 		})
 		if errors.Is(ctx.Err(), context.Canceled) {
 			status = "canceled"
-			return "", fmt.Errorf("router: canceled waiting for response from %s (request %s)", rec.Hostname, requestID)
+			return "", fmt.Errorf("router: canceled waiting for response from %s (request %s): %w", rec.Hostname, requestID, ErrCanceled)
 		}
-		return "", fmt.Errorf("router: timeout waiting for response from %s (request %s)", rec.Hostname, requestID)
+		return "", fmt.Errorf("router: timeout waiting for response from %s (request %s): %w", rec.Hostname, requestID, ErrTimeout)
 	case msg := <-slot.ch:
 		switch p := msg.Payload.(type) {
 		case *tunnel.TunnelMessage_ToolResponse:

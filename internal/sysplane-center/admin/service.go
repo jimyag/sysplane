@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -18,6 +19,11 @@ import (
 	"github.com/jimyag/sysplane/internal/pkg/tokenauth"
 	"github.com/jimyag/sysplane/internal/sysplane-center/registry"
 	"github.com/jimyag/sysplane/internal/sysplane-center/router"
+)
+
+var (
+	errNodeNotFound = errors.New("node not found")
+	errNodeOffline  = errors.New("node offline")
 )
 
 type RemoteForwarder interface {
@@ -366,7 +372,7 @@ func (s *Service) ListTemplates(filter TemplateListFilter) ListPage[CommandTempl
 		if filter.RiskLevel != "" && tpl.RiskLevel != filter.RiskLevel {
 			continue
 		}
-		if filter.TargetOS != "" && !containsString(tpl.TargetOS, filter.TargetOS) {
+		if filter.TargetOS != "" && !slices.Contains(tpl.TargetOS, filter.TargetOS) {
 			continue
 		}
 		items = append(items, *cloneTemplate(tpl))
@@ -496,7 +502,7 @@ func (s *Service) ListAuditEvents(filter AuditFilter) ListPage[AuditEvent] {
 		if filter.SubjectID != "" && evt.SubjectID != filter.SubjectID {
 			continue
 		}
-		if filter.NodeID != "" && !containsString(evt.TargetNodeIDs, filter.NodeID) {
+		if filter.NodeID != "" && !slices.Contains(evt.TargetNodeIDs, filter.NodeID) {
 			continue
 		}
 		items = append(items, *cloneAudit(evt))
@@ -583,7 +589,7 @@ func (s *Service) preparePlan(meta RequestMeta, req CreateInvocationRequest) (*e
 	return plan, nil
 }
 
-func (s *Service) executeInvocation(ctx context.Context, meta RequestMeta, invocationID string, plan *executionPlan) []InvocationResult {
+func (s *Service) executeInvocation(ctx context.Context, _ RequestMeta, invocationID string, plan *executionPlan) []InvocationResult {
 	started := time.Now().UTC()
 	s.mu.Lock()
 	if inv, ok := s.invocations[invocationID]; ok {
@@ -733,13 +739,13 @@ func (s *Service) invokeToolWithRequest(ctx context.Context, requestID, nodeID, 
 				return decodeResult(resultJSON), nil
 			}
 		}
-		return nil, fmt.Errorf("node not found")
+		return nil, errNodeNotFound
 	}
 	if rec.NodeType != "agent" {
-		return nil, fmt.Errorf("node not found")
+		return nil, errNodeNotFound
 	}
 	if rec.Status != registry.StatusOnline {
-		return nil, fmt.Errorf("node offline")
+		return nil, errNodeOffline
 	}
 	if s.log != nil {
 		_ = s.log.InsertToolCallLog(ctx, requestID, s.instanceID, nodeID, toolName, argsJSON)
@@ -1142,20 +1148,25 @@ func statusFromErrorCode(code string) string {
 }
 
 func classifyInvokeError(nodeID string, err error) *InvocationError {
-	msg := err.Error()
+	details := map[string]any{"node_id": nodeID}
 	switch {
-	case strings.Contains(msg, "node not found"), strings.Contains(msg, "agent not found"), strings.Contains(msg, "HOST_NOT_FOUND"):
-		return &InvocationError{Code: "NODE_NOT_FOUND", Message: "target node was not found", Details: map[string]any{"node_id": nodeID}}
-	case strings.Contains(msg, "offline"):
-		return &InvocationError{Code: "NODE_OFFLINE", Message: "target node is offline", Details: map[string]any{"node_id": nodeID}}
-	case strings.Contains(msg, "canceled"):
-		return &InvocationError{Code: "CANCELED", Message: "invocation was canceled", Details: map[string]any{"node_id": nodeID}}
-	case strings.Contains(msg, "timeout"), errors.Is(err, context.DeadlineExceeded):
-		return &InvocationError{Code: "TIMEOUT", Message: "upstream execution timed out", Details: map[string]any{"node_id": nodeID}}
-	case strings.Contains(strings.ToLower(msg), "denied"), strings.Contains(msg, "exceeds limit"):
-		return &InvocationError{Code: "POLICY_DENIED", Message: msg, Details: map[string]any{"node_id": nodeID}}
+	case errors.Is(err, errNodeNotFound):
+		return &InvocationError{Code: "NODE_NOT_FOUND", Message: "target node was not found", Details: details}
+	case errors.Is(err, errNodeOffline):
+		return &InvocationError{Code: "NODE_OFFLINE", Message: "target node is offline", Details: details}
+	case errors.Is(err, router.ErrCanceled), errors.Is(err, context.Canceled):
+		return &InvocationError{Code: "CANCELED", Message: "invocation was canceled", Details: details}
+	case errors.Is(err, router.ErrTimeout), errors.Is(err, context.DeadlineExceeded):
+		return &InvocationError{Code: "TIMEOUT", Message: "upstream execution timed out", Details: details}
 	default:
-		return &InvocationError{Code: "INTERNAL_ERROR", Message: msg, Details: map[string]any{"node_id": nodeID}}
+		msg := err.Error()
+		if strings.Contains(msg, "HOST_NOT_FOUND") || strings.Contains(msg, "agent not found") {
+			return &InvocationError{Code: "NODE_NOT_FOUND", Message: "target node was not found", Details: details}
+		}
+		if strings.Contains(strings.ToLower(msg), "denied") || strings.Contains(msg, "exceeds limit") {
+			return &InvocationError{Code: "POLICY_DENIED", Message: msg, Details: details}
+		}
+		return &InvocationError{Code: "INTERNAL_ERROR", Message: msg, Details: details}
 	}
 }
 
@@ -1207,10 +1218,7 @@ func paginate[T any](items []T, cursor string, limit int, idFn func(T) string) L
 	if start > len(items) {
 		start = len(items)
 	}
-	end := start + limit
-	if end > len(items) {
-		end = len(items)
-	}
+	end := min(start+limit, len(items))
 	next := ""
 	if end < len(items) {
 		next = idFn(items[end-1])
@@ -1332,20 +1340,12 @@ func dedupe(values []string) []string {
 	return out
 }
 
-func containsString(items []string, value string) bool {
-	for _, item := range items {
-		if item == value {
-			return true
-		}
-	}
-	return false
-}
 
 func matchesTargetOS(targets []string, osName string) bool {
 	if len(targets) == 0 || osName == "" {
 		return true
 	}
-	return containsString(targets, osName)
+	return slices.Contains(targets, osName)
 }
 
 func nodeOS(rec *registry.AgentRecord) string {
