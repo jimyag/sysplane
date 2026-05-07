@@ -154,13 +154,15 @@ func (s *TunnelServiceServer) Connect(srv tunnel.TunnelService_ConnectServer) er
 		switch p := msg.Payload.(type) {
 		case *tunnel.TunnelMessage_Heartbeat:
 			s.reg.UpdateHeartbeat(req.Hostname)
-			_ = ts.Send(&tunnel.TunnelMessage{
+			if err := ts.Send(&tunnel.TunnelMessage{
 				Payload: &tunnel.TunnelMessage_HeartbeatAck{
 					HeartbeatAck: &tunnel.HeartbeatAck{
 						TimestampMs: p.Heartbeat.TimestampMs,
 					},
 				},
-			})
+			}); err != nil {
+				s.logger.Debug("send heartbeat ack failed", "hostname", req.Hostname, "error", err)
+			}
 			if s.persister != nil {
 				go func() {
 					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

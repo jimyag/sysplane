@@ -271,7 +271,9 @@ func makeInternalForwardHandler(reg *registry.Registry, rtr *router.Router, secr
 		rec := reg.Lookup(req.TargetHost)
 		if rec == nil {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(ha.ForwardResponse{Error: fmt.Sprintf("agent %q not found", req.TargetHost)})
+			if err := json.NewEncoder(w).Encode(ha.ForwardResponse{Error: fmt.Sprintf("agent %q not found", req.TargetHost)}); err != nil {
+				logger.Debug("encode response failed", "error", err)
+			}
 			return
 		}
 
@@ -288,10 +290,14 @@ func makeInternalForwardHandler(reg *registry.Registry, rtr *router.Router, secr
 			_ = callLogger.CompleteToolCallLog(r.Context(), req.RequestID, result, errMsg)
 		}
 		if err != nil {
-			json.NewEncoder(w).Encode(ha.ForwardResponse{Error: err.Error()})
+			if err := json.NewEncoder(w).Encode(ha.ForwardResponse{Error: err.Error()}); err != nil {
+				logger.Debug("encode response failed", "error", err)
+			}
 			return
 		}
-		json.NewEncoder(w).Encode(ha.ForwardResponse{ResultJSON: result})
+		if err := json.NewEncoder(w).Encode(ha.ForwardResponse{ResultJSON: result}); err != nil {
+			logger.Debug("encode response failed", "error", err)
+		}
 		logger.Debug("内部转发完成", "target", req.TargetHost, "tool", req.ToolName)
 	}
 }
