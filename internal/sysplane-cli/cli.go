@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type App struct {
@@ -497,7 +499,7 @@ func (a *App) request(ctx context.Context, method, path string, query url.Values
 	}
 	req.Header.Set("Authorization", "Bearer "+a.token)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("X-Request-Id", "cli-"+a.now().Format("20060102150405"))
+	req.Header.Set("X-Request-Id", "cli-"+uuid.New().String())
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
