@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -63,11 +64,12 @@ func (c *Catalog) addDomainTokens(seen map[string]Domain, domain Domain, tokens 
 		if token == "" {
 			return fmt.Errorf("%s token at index %d must not be empty", domain, idx)
 		}
-		if prev, ok := seen[token]; ok {
+		fp := tokenFingerprint(token)
+		if prev, ok := seen[fp]; ok {
 			return fmt.Errorf("token %q is duplicated across %s and %s domains", token, prev, domain)
 		}
-		seen[token] = domain
-		dst[token] = Identity{
+		seen[fp] = domain
+		dst[fp] = Identity{
 			Domain:      domain,
 			SubjectID:   fmt.Sprintf("%s_%02d", domain, idx+1),
 			Fingerprint: tokenFingerprint(token),
@@ -81,17 +83,15 @@ func (c *Catalog) AuthenticateHTTP(header string, allowed ...Domain) (Identity, 
 	if err != nil {
 		return Identity{}, err
 	}
-	identity, ok := c.httpTokens[token]
+	identity, ok := c.httpTokens[tokenFingerprint(token)]
 	if !ok {
 		return Identity{}, fmt.Errorf("unauthorized")
 	}
 	if len(allowed) == 0 {
 		return identity, nil
 	}
-	for _, domain := range allowed {
-		if identity.Domain == domain {
-			return identity, nil
-		}
+	if slices.Contains(allowed, identity.Domain) {
+		return identity, nil
 	}
 	return Identity{}, fmt.Errorf("forbidden")
 }
@@ -105,7 +105,7 @@ func (c *Catalog) AuthenticateRegistration(domain Domain, token string) (Identit
 	if !ok {
 		return Identity{}, fmt.Errorf("unsupported registration domain %q", domain)
 	}
-	identity, ok := domainTokens[token]
+	identity, ok := domainTokens[tokenFingerprint(token)]
 	if !ok {
 		return Identity{}, fmt.Errorf("unauthorized")
 	}
