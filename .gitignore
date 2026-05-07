@@ -3,6 +3,12 @@ bin/
 /sysplane-agent
 /sysplane-proxy
 /sysplane-center
+/sysplane
+
+# Claude / task tooling
+.claude/
+.task/
+docs/plans/
 
 # Go build cache
 *.exe
