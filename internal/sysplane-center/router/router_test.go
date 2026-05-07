@@ -117,8 +117,17 @@ func TestSend_TimeoutSendsCancelRequest(t *testing.T) {
 		t.Fatal("期望超时错误，但没有报错")
 	}
 
-	// 等待一小段时间让 CancelRequest 被发送
-	time.Sleep(50 * time.Millisecond)
+	// 等待直到收到至少 2 条消息（ToolRequest + CancelRequest）
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		fs.mu.Lock()
+		count := len(fs.received)
+		fs.mu.Unlock()
+		if count >= 2 {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 
 	fs.mu.Lock()
 	msgs := make([]*tunnel.TunnelMessage, len(fs.received))

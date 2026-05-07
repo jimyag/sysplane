@@ -134,8 +134,14 @@ func TestTunnelSvc_AgentReregistration(t *testing.T) {
 		}
 	}
 
-	// Give the server goroutine time to run the deferred UnregisterByStream.
-	time.Sleep(150 * time.Millisecond)
+	// Poll until the registry entry disappears (deferred UnregisterByStream runs asynchronously).
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if reg.Lookup("test-agent") == nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 
 	// Agent should have been removed from the registry.
 	if got := reg.Lookup("test-agent"); got != nil {
