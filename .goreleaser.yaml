@@ -5,9 +5,9 @@ before:
     - go mod tidy
 
 builds:
-  - id: sys-mcp-center
-    binary: sys-mcp-center
-    main: ./cmd/sys-mcp-center
+  - id: sysplane-center
+    binary: sysplane-center
+    main: ./cmd/sysplane-center
     env:
       - CGO_ENABLED=0
     goos:
@@ -23,9 +23,9 @@ builds:
       - -X 'github.com/jimmicro/version.GitTag={{ .Tag }}'
       - -X 'github.com/jimmicro/version.BuildTime={{ .Date }}'
 
-  - id: sys-mcp-proxy
-    binary: sys-mcp-proxy
-    main: ./cmd/sys-mcp-proxy
+  - id: sysplane-proxy
+    binary: sysplane-proxy
+    main: ./cmd/sysplane-proxy
     env:
       - CGO_ENABLED=0
     goos:
@@ -41,9 +41,9 @@ builds:
       - -X 'github.com/jimmicro/version.GitTag={{ .Tag }}'
       - -X 'github.com/jimmicro/version.BuildTime={{ .Date }}'
 
-  - id: sys-mcp-agent
-    binary: sys-mcp-agent
-    main: ./cmd/sys-mcp-agent
+  - id: sysplane-agent
+    binary: sysplane-agent
+    main: ./cmd/sysplane-agent
     env:
       - CGO_ENABLED=0
     goos:
@@ -61,17 +61,17 @@ builds:
 
 archives:
   - id: center
-    ids: [sys-mcp-center]
+    ids: [sysplane-center]
     formats:
       - binary
     name_template: "{{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
   - id: proxy
-    ids: [sys-mcp-proxy]
+    ids: [sysplane-proxy]
     formats:
       - binary
     name_template: "{{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
   - id: agent
-    ids: [sys-mcp-agent]
+    ids: [sysplane-agent]
     formats:
       - binary
     name_template: "{{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"

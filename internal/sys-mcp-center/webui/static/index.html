@@ -1,0 +1,864 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Sysplane Admin</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b1220;
+      --panel: #111827;
+      --panel-2: #1f2937;
+      --line: #334155;
+      --text: #e5e7eb;
+      --muted: #94a3b8;
+      --accent: #38bdf8;
+      --ok: #22c55e;
+      --warn: #f59e0b;
+      --err: #ef4444;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: linear-gradient(180deg, #020617 0%, var(--bg) 100%);
+      color: var(--text);
+    }
+    header, main { max-width: 1440px; margin: 0 auto; padding: 20px 24px; }
+    h1, h2, h3 { margin: 0 0 12px; }
+    p { margin: 0; color: var(--muted); }
+    nav {
+      display: flex;
+      gap: 8px;
+      margin-top: 16px;
+      flex-wrap: wrap;
+    }
+    .tab {
+      border: 1px solid var(--line);
+      background: transparent;
+      color: var(--text);
+      padding: 10px 14px;
+      border-radius: 999px;
+      cursor: pointer;
+    }
+    .tab.active {
+      background: rgba(56, 189, 248, 0.16);
+      border-color: var(--accent);
+    }
+    .auth, .grid, .stack {
+      display: grid;
+      gap: 16px;
+    }
+    .auth { grid-template-columns: 1.6fr auto auto; align-items: end; }
+    .grid { grid-template-columns: 320px 1fr; align-items: start; }
+    .stack { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+    .panel {
+      background: rgba(17, 24, 39, 0.92);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 16px;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.25);
+    }
+    .hidden { display: none; }
+    label {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+    input, textarea, select, button {
+      width: 100%;
+      border-radius: 10px;
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      color: var(--text);
+      padding: 10px 12px;
+      font: inherit;
+    }
+    textarea { min-height: 120px; resize: vertical; }
+    button {
+      cursor: pointer;
+      border: none;
+      background: #0ea5e9;
+      font-weight: 600;
+    }
+    button.secondary {
+      background: var(--panel-2);
+      border: 1px solid var(--line);
+    }
+    button.warn { background: #b45309; }
+    .row {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+    .row > * { flex: 1; min-width: 120px; }
+    .list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 560px;
+      overflow: auto;
+    }
+    .list button {
+      text-align: left;
+      background: transparent;
+      border: 1px solid var(--line);
+      padding: 12px;
+    }
+    .list button.active {
+      border-color: var(--accent);
+      box-shadow: inset 0 0 0 1px var(--accent);
+    }
+    .badge {
+      display: inline-flex;
+      gap: 6px;
+      align-items: center;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 12px;
+      margin-left: 8px;
+      background: rgba(56, 189, 248, 0.15);
+      color: var(--accent);
+    }
+    .status { margin-top: 12px; font-size: 14px; }
+    .status.ok { color: var(--ok); }
+    .status.warn { color: var(--warn); }
+    .status.err { color: var(--err); }
+    .hint {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 8px;
+    }
+    pre {
+      margin: 0;
+      padding: 14px;
+      overflow: auto;
+      border-radius: 12px;
+      background: #020617;
+      border: 1px solid #1e293b;
+      font-size: 13px;
+      line-height: 1.6;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .toolbar {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    }
+    @media (max-width: 960px) {
+      header, main { padding: 16px; }
+      .auth, .grid { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Sysplane Admin</h1>
+    <p>完整的 v1 管理后台入口：节点浏览、命令模板、Invocation 执行中心、审计查询都直接复用 `sysplane-center` 的 `/v1/...` API。</p>
+    <nav>
+      <button class="tab active" data-tab="nodes">节点</button>
+      <button class="tab" data-tab="templates">命令模板</button>
+      <button class="tab" data-tab="invocations">执行中心</button>
+      <button class="tab" data-tab="audit">审计</button>
+    </nav>
+  </header>
+
+  <main class="stack">
+    <section class="panel">
+      <div class="auth">
+        <div>
+          <label for="token">Bearer Token</label>
+          <input id="token" type="password" placeholder="粘贴 client / admin token" />
+        </div>
+        <button id="save-token">保存并刷新</button>
+        <button id="clear-token" class="secondary">清空</button>
+      </div>
+      <div id="auth-status" class="status warn">尚未加载数据。</div>
+      <div class="hint">需要 `admin token` 才能创建或修改模板、查看审计；`client token` 可查看节点和执行只读动作。</div>
+    </section>
+
+    <section id="tab-nodes" class="grid">
+      <div class="panel">
+        <h2>节点</h2>
+        <div class="row">
+          <input id="node-filter-hostname" placeholder="hostname 过滤" />
+          <select id="node-filter-status">
+            <option value="">全部状态</option>
+            <option value="online">online</option>
+            <option value="offline">offline</option>
+          </select>
+        </div>
+        <div class="row" style="margin-top: 12px;">
+          <button id="refresh-nodes">刷新节点</button>
+        </div>
+        <div id="nodes" class="list" style="margin-top: 12px;"></div>
+      </div>
+
+      <div class="stack">
+        <div class="panel">
+          <h2>节点详情</h2>
+          <pre id="node-detail">请先选择节点。</pre>
+          <h3 style="margin-top: 16px;">能力</h3>
+          <pre id="capabilities">请先选择节点。</pre>
+        </div>
+
+        <div class="panel">
+          <h2>快捷动作</h2>
+          <div class="toolbar">
+            <button data-node-action="sys:info">sys:info</button>
+            <button data-node-action="sys:hardware">sys:hardware</button>
+            <button data-node-action="fs:list">fs:list</button>
+            <button data-node-action="fs:read">fs:read</button>
+            <button data-node-action="fs:stat">fs:stat</button>
+            <button data-node-action="fs:write">fs:write</button>
+          </div>
+          <div class="row" style="margin-top: 16px;">
+            <div>
+              <label for="node-path">path</label>
+              <input id="node-path" value="/etc/hostname" />
+            </div>
+            <div>
+              <label for="node-limit">limit / length</label>
+              <input id="node-limit" type="number" value="20" min="1" />
+            </div>
+          </div>
+          <div style="margin-top: 12px;">
+            <label for="node-content">content（仅 fs:write）</label>
+            <textarea id="node-content">hello from sysplane</textarea>
+          </div>
+          <h3 style="margin-top: 16px;">结果</h3>
+          <pre id="node-action-result">请先执行一个动作。</pre>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-templates" class="grid hidden">
+      <div class="panel">
+        <h2>命令模板</h2>
+        <div class="row">
+          <input id="template-filter-name" placeholder="名称过滤" />
+          <select id="template-filter-risk">
+            <option value="">全部风险级别</option>
+            <option value="readonly">readonly</option>
+            <option value="mutating">mutating</option>
+            <option value="dangerous">dangerous</option>
+          </select>
+        </div>
+        <div class="row" style="margin-top: 12px;">
+          <button id="refresh-templates">刷新模板</button>
+        </div>
+        <div id="templates" class="list" style="margin-top: 12px;"></div>
+      </div>
+
+      <div class="stack">
+        <div class="panel">
+          <h2>模板详情</h2>
+          <pre id="template-detail">请先选择模板。</pre>
+        </div>
+
+        <div class="panel">
+          <h2>创建 / 更新模板</h2>
+          <div class="row">
+            <div>
+              <label for="tpl-name">name</label>
+              <input id="tpl-name" placeholder="docker.ps" />
+            </div>
+            <div>
+              <label for="tpl-risk">risk_level</label>
+              <select id="tpl-risk">
+                <option value="readonly">readonly</option>
+                <option value="mutating">mutating</option>
+                <option value="dangerous">dangerous</option>
+              </select>
+            </div>
+            <div>
+              <label for="tpl-enabled">enabled（仅更新）</label>
+              <select id="tpl-enabled">
+                <option value="">保持不变</option>
+                <option value="true">true</option>
+                <option value="false">false</option>
+              </select>
+            </div>
+          </div>
+          <div style="margin-top: 12px;">
+            <label for="tpl-description">description</label>
+            <textarea id="tpl-description"></textarea>
+          </div>
+          <div class="row" style="margin-top: 12px;">
+            <div>
+              <label for="tpl-target-os">target_os（逗号分隔）</label>
+              <input id="tpl-target-os" value="linux" />
+            </div>
+            <div>
+              <label for="tpl-command">executor.command</label>
+              <input id="tpl-command" value="/bin/echo" />
+            </div>
+          </div>
+          <div style="margin-top: 12px;">
+            <label for="tpl-args">executor.args（JSON 数组）</label>
+            <textarea id="tpl-args">["hello"]</textarea>
+          </div>
+          <div style="margin-top: 12px;">
+            <label for="tpl-schema">params_schema（JSON）</label>
+            <textarea id="tpl-schema">{"type":"object","properties":{},"additionalProperties":false}</textarea>
+          </div>
+          <div class="row" style="margin-top: 12px;">
+            <div>
+              <label for="tpl-default-timeout">default_timeout_sec</label>
+              <input id="tpl-default-timeout" type="number" value="10" min="1" />
+            </div>
+            <div>
+              <label for="tpl-max-timeout">max_timeout_sec</label>
+              <input id="tpl-max-timeout" type="number" value="30" min="1" />
+            </div>
+            <div>
+              <label for="tpl-max-output">max_output_bytes</label>
+              <input id="tpl-max-output" type="number" value="262144" min="1" />
+            </div>
+          </div>
+          <div class="row" style="margin-top: 12px;">
+            <button id="create-template">创建模板</button>
+            <button id="update-template" class="secondary">更新当前模板</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>调用模板</h2>
+          <div class="row">
+            <div>
+              <label for="tpl-invoke-nodes">target node_ids（逗号分隔）</label>
+              <input id="tpl-invoke-nodes" placeholder="node-01,node-02" />
+            </div>
+            <div>
+              <label for="tpl-invoke-timeout">timeout_sec</label>
+              <input id="tpl-invoke-timeout" type="number" value="10" min="1" />
+            </div>
+            <div>
+              <label for="tpl-invoke-async">async</label>
+              <select id="tpl-invoke-async">
+                <option value="false">false</option>
+                <option value="true">true</option>
+              </select>
+            </div>
+          </div>
+          <div style="margin-top: 12px;">
+            <label for="tpl-invoke-params">params（JSON）</label>
+            <textarea id="tpl-invoke-params">{}</textarea>
+          </div>
+          <div class="row" style="margin-top: 12px;">
+            <button id="invoke-template">调用当前模板</button>
+          </div>
+          <h3 style="margin-top: 16px;">结果</h3>
+          <pre id="template-invoke-result">请先选择模板并调用。</pre>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-invocations" class="grid hidden">
+      <div class="panel">
+        <h2>Invocation 列表</h2>
+        <div class="row">
+          <select id="inv-filter-status">
+            <option value="">全部状态</option>
+            <option value="pending">pending</option>
+            <option value="running">running</option>
+            <option value="succeeded">succeeded</option>
+            <option value="failed">failed</option>
+            <option value="partial">partial</option>
+            <option value="canceled">canceled</option>
+          </select>
+          <input id="inv-filter-action" placeholder="action 过滤" />
+        </div>
+        <div class="row" style="margin-top: 12px;">
+          <button id="refresh-invocations">刷新列表</button>
+        </div>
+        <div id="invocations" class="list" style="margin-top: 12px;"></div>
+      </div>
+
+      <div class="stack">
+        <div class="panel">
+          <h2>Invocation 详情</h2>
+          <pre id="invocation-detail">请先选择 invocation。</pre>
+          <div class="row" style="margin-top: 12px;">
+            <button id="refresh-invocation-results" class="secondary">刷新结果</button>
+            <button id="cancel-invocation" class="warn">取消执行</button>
+          </div>
+          <h3 style="margin-top: 16px;">结果</h3>
+          <pre id="invocation-results">请先选择 invocation。</pre>
+        </div>
+
+        <div class="panel">
+          <h2>新建 Invocation</h2>
+          <div class="row">
+            <div>
+              <label for="inv-action-type">action_type</label>
+              <select id="inv-action-type">
+                <option value="builtin">builtin</option>
+                <option value="command_template">command_template</option>
+              </select>
+            </div>
+            <div>
+              <label for="inv-action">action</label>
+              <input id="inv-action" value="fs.read" />
+            </div>
+          </div>
+          <div class="row" style="margin-top: 12px;">
+            <div>
+              <label for="inv-node-ids">targets.node_ids（逗号分隔）</label>
+              <input id="inv-node-ids" value="node-01" />
+            </div>
+            <div>
+              <label for="inv-timeout">timeout_sec</label>
+              <input id="inv-timeout" type="number" value="10" min="1" />
+            </div>
+            <div>
+              <label for="inv-async">async</label>
+              <select id="inv-async">
+                <option value="false">false</option>
+                <option value="true">true</option>
+              </select>
+            </div>
+          </div>
+          <div style="margin-top: 12px;">
+            <label for="inv-params">params（JSON）</label>
+            <textarea id="inv-params">{"path":"/etc/hostname"}</textarea>
+          </div>
+          <div class="row" style="margin-top: 12px;">
+            <button id="create-invocation">创建 Invocation</button>
+          </div>
+          <h3 style="margin-top: 16px;">创建结果</h3>
+          <pre id="create-invocation-result">请先提交。</pre>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-audit" class="grid hidden">
+      <div class="panel">
+        <h2>审计事件</h2>
+        <div class="row">
+          <input id="audit-filter-action" placeholder="action 过滤" />
+          <select id="audit-filter-decision">
+            <option value="">全部 decision</option>
+            <option value="accepted">accepted</option>
+            <option value="succeeded">succeeded</option>
+            <option value="failed">failed</option>
+            <option value="partial">partial</option>
+            <option value="canceled">canceled</option>
+            <option value="created">created</option>
+            <option value="updated">updated</option>
+          </select>
+        </div>
+        <div class="row" style="margin-top: 12px;">
+          <button id="refresh-audit">刷新审计</button>
+        </div>
+        <div id="audit-events" class="list" style="margin-top: 12px;"></div>
+      </div>
+
+      <div class="panel">
+        <h2>审计详情</h2>
+        <pre id="audit-detail">请先选择审计事件。</pre>
+      </div>
+    </section>
+  </main>
+
+  <script>
+    const state = {
+      activeTab: "nodes",
+      selectedNodeId: "",
+      selectedTemplateId: "",
+      selectedInvocationId: "",
+      selectedAuditId: "",
+      nodes: [],
+      templates: [],
+      invocations: [],
+      audits: []
+    };
+
+    const tokenInput = document.getElementById("token");
+    const authStatus = document.getElementById("auth-status");
+    const savedToken = localStorage.getItem("sysplane.webui.token");
+    if (savedToken) tokenInput.value = savedToken;
+
+    document.querySelectorAll(".tab").forEach((button) => {
+      button.addEventListener("click", () => switchTab(button.dataset.tab));
+    });
+
+    document.getElementById("save-token").addEventListener("click", async () => {
+      localStorage.setItem("sysplane.webui.token", tokenInput.value.trim());
+      await refreshActiveTab();
+    });
+
+    document.getElementById("clear-token").addEventListener("click", () => {
+      localStorage.removeItem("sysplane.webui.token");
+      tokenInput.value = "";
+      setStatus("warn", "Token 已清空。");
+    });
+
+    document.getElementById("refresh-nodes").addEventListener("click", loadNodes);
+    document.getElementById("refresh-templates").addEventListener("click", loadTemplates);
+    document.getElementById("refresh-invocations").addEventListener("click", loadInvocations);
+    document.getElementById("refresh-audit").addEventListener("click", loadAuditEvents);
+    document.getElementById("create-template").addEventListener("click", createTemplate);
+    document.getElementById("update-template").addEventListener("click", updateTemplate);
+    document.getElementById("invoke-template").addEventListener("click", invokeTemplate);
+    document.getElementById("create-invocation").addEventListener("click", createInvocation);
+    document.getElementById("refresh-invocation-results").addEventListener("click", loadSelectedInvocation);
+    document.getElementById("cancel-invocation").addEventListener("click", cancelInvocation);
+
+    document.querySelectorAll("[data-node-action]").forEach((button) => {
+      button.addEventListener("click", () => runNodeAction(button.dataset.nodeAction));
+    });
+
+    function switchTab(tab) {
+      state.activeTab = tab;
+      document.querySelectorAll(".tab").forEach((button) => {
+        button.classList.toggle("active", button.dataset.tab === tab);
+      });
+      ["nodes", "templates", "invocations", "audit"].forEach((name) => {
+        document.getElementById(`tab-${name}`).classList.toggle("hidden", name !== tab);
+      });
+      refreshActiveTab();
+    }
+
+    async function refreshActiveTab() {
+      setStatus("warn", "正在加载数据...");
+      try {
+        if (state.activeTab === "nodes") await loadNodes();
+        if (state.activeTab === "templates") await loadTemplates();
+        if (state.activeTab === "invocations") await loadInvocations();
+        if (state.activeTab === "audit") await loadAuditEvents();
+        setStatus("ok", "数据已刷新。");
+      } catch (error) {
+        setStatus("err", `加载失败：${error.message}`);
+      }
+    }
+
+    function setStatus(kind, message) {
+      authStatus.className = `status ${kind}`;
+      authStatus.textContent = message;
+    }
+
+    async function api(path, options = {}) {
+      const token = tokenInput.value.trim();
+      const headers = new Headers(options.headers || {});
+      headers.set("Content-Type", "application/json");
+      if (token) headers.set("Authorization", `Bearer ${token}`);
+      const res = await fetch(path, { ...options, headers });
+      const text = await res.text();
+      let body = {};
+      try {
+        body = text ? JSON.parse(text) : {};
+      } catch {
+        body = { raw: text };
+      }
+      if (!res.ok) {
+        throw new Error(body?.error?.message || `HTTP ${res.status}`);
+      }
+      return body;
+    }
+
+    function pretty(value) {
+      return JSON.stringify(value, null, 2);
+    }
+
+    function splitCSV(value) {
+      return value.split(",").map((item) => item.trim()).filter(Boolean);
+    }
+
+    function selectedNodeIDs() {
+      const raw = document.getElementById("inv-node-ids").value.trim();
+      return splitCSV(raw);
+    }
+
+    async function loadNodes() {
+      const hostname = document.getElementById("node-filter-hostname").value.trim();
+      const status = document.getElementById("node-filter-status").value;
+      const qs = new URLSearchParams();
+      if (hostname) qs.set("hostname", hostname);
+      if (status) qs.set("status", status);
+      const body = await api(`/v1/nodes${qs.toString() ? `?${qs}` : ""}`);
+      state.nodes = body.items || [];
+      const list = document.getElementById("nodes");
+      list.innerHTML = "";
+      if (!state.nodes.length) {
+        list.innerHTML = "<div class='hint'>没有可用节点。</div>";
+        return;
+      }
+      state.nodes.forEach((node) => {
+        const button = document.createElement("button");
+        button.className = node.id === state.selectedNodeId ? "active" : "";
+        button.innerHTML = `<strong>${node.hostname}</strong><span class="badge">${node.status}</span><div class="hint">${(node.agent?.connected_via || []).join(" → ") || "direct"}</div>`;
+        button.addEventListener("click", () => selectNode(node.id));
+        list.appendChild(button);
+      });
+      if (!state.selectedNodeId) {
+        await selectNode(state.nodes[0].id);
+      }
+    }
+
+    async function selectNode(nodeID) {
+      state.selectedNodeId = nodeID;
+      await loadNodes();
+      const detail = await api(`/v1/nodes/${encodeURIComponent(nodeID)}`);
+      const caps = await api(`/v1/nodes/${encodeURIComponent(nodeID)}/capabilities`);
+      document.getElementById("node-detail").textContent = pretty(detail);
+      document.getElementById("capabilities").textContent = pretty(caps.items || []);
+      document.getElementById("tpl-invoke-nodes").value = nodeID;
+      document.getElementById("inv-node-ids").value = nodeID;
+    }
+
+    async function runNodeAction(action) {
+      if (!state.selectedNodeId) {
+        throw new Error("请先选择节点");
+      }
+      const path = document.getElementById("node-path").value.trim();
+      const size = Number(document.getElementById("node-limit").value || "0");
+      const content = document.getElementById("node-content").value;
+      const payload = {};
+      if (action.startsWith("fs:")) payload.path = path;
+      if (action === "fs:list") payload.limit = size;
+      if (action === "fs:read") payload.length = size;
+      if (action === "fs:write") {
+        payload.content = content;
+        payload.overwrite = true;
+      }
+      const body = await api(`/v1/nodes/${encodeURIComponent(state.selectedNodeId)}/actions/${action}`, {
+        method: "POST",
+        body: JSON.stringify(payload)
+      });
+      document.getElementById("node-action-result").textContent = pretty(body.data);
+      await loadInvocations();
+    }
+
+    async function loadTemplates() {
+      const qs = new URLSearchParams();
+      const name = document.getElementById("template-filter-name").value.trim();
+      const risk = document.getElementById("template-filter-risk").value;
+      if (name) qs.set("name", name);
+      if (risk) qs.set("risk_level", risk);
+      const body = await api(`/v1/command-templates${qs.toString() ? `?${qs}` : ""}`);
+      state.templates = body.items || [];
+      const list = document.getElementById("templates");
+      list.innerHTML = "";
+      if (!state.templates.length) {
+        list.innerHTML = "<div class='hint'>还没有模板。</div>";
+        document.getElementById("template-detail").textContent = "还没有模板。";
+        return;
+      }
+      state.templates.forEach((tpl) => {
+        const button = document.createElement("button");
+        button.className = tpl.id === state.selectedTemplateId ? "active" : "";
+        button.innerHTML = `<strong>${tpl.name}</strong><span class="badge">${tpl.risk_level}</span><div class="hint">${tpl.enabled ? "enabled" : "disabled"}</div>`;
+        button.addEventListener("click", () => selectTemplate(tpl.id));
+        list.appendChild(button);
+      });
+      if (!state.selectedTemplateId) {
+        await selectTemplate(state.templates[0].id);
+      }
+    }
+
+    async function selectTemplate(templateID) {
+      state.selectedTemplateId = templateID;
+      const tpl = await api(`/v1/command-templates/${encodeURIComponent(templateID)}`);
+      document.getElementById("template-detail").textContent = pretty(tpl);
+      document.getElementById("tpl-name").value = tpl.name || "";
+      document.getElementById("tpl-description").value = tpl.description || "";
+      document.getElementById("tpl-risk").value = tpl.risk_level || "readonly";
+      document.getElementById("tpl-enabled").value = String(tpl.enabled);
+      document.getElementById("tpl-target-os").value = (tpl.target_os || []).join(",");
+      document.getElementById("tpl-command").value = tpl.executor?.command || "";
+      document.getElementById("tpl-args").value = pretty(tpl.executor?.args || []);
+      document.getElementById("tpl-schema").value = pretty(tpl.params_schema || {});
+      document.getElementById("tpl-default-timeout").value = tpl.default_timeout_sec || 10;
+      document.getElementById("tpl-max-timeout").value = tpl.max_timeout_sec || 30;
+      document.getElementById("tpl-max-output").value = tpl.max_output_bytes || 262144;
+      await loadTemplates();
+    }
+
+    async function createTemplate() {
+      const payload = collectTemplatePayload(false);
+      const tpl = await api("/v1/command-templates", {
+        method: "POST",
+        body: JSON.stringify(payload)
+      });
+      document.getElementById("template-detail").textContent = pretty(tpl);
+      state.selectedTemplateId = tpl.id;
+      await loadTemplates();
+    }
+
+    async function updateTemplate() {
+      if (!state.selectedTemplateId) {
+        throw new Error("请先选择模板");
+      }
+      const payload = collectTemplatePayload(true);
+      const tpl = await api(`/v1/command-templates/${encodeURIComponent(state.selectedTemplateId)}`, {
+        method: "PATCH",
+        body: JSON.stringify(payload)
+      });
+      document.getElementById("template-detail").textContent = pretty(tpl);
+      await loadTemplates();
+    }
+
+    function collectTemplatePayload(isPatch) {
+      const payload = {
+        name: document.getElementById("tpl-name").value.trim(),
+        description: document.getElementById("tpl-description").value,
+        risk_level: document.getElementById("tpl-risk").value,
+        target_os: splitCSV(document.getElementById("tpl-target-os").value),
+        executor: {
+          type: "process",
+          command: document.getElementById("tpl-command").value.trim(),
+          args: JSON.parse(document.getElementById("tpl-args").value || "[]")
+        },
+        params_schema: JSON.parse(document.getElementById("tpl-schema").value || "{}"),
+        default_timeout_sec: Number(document.getElementById("tpl-default-timeout").value || "10"),
+        max_timeout_sec: Number(document.getElementById("tpl-max-timeout").value || "30"),
+        max_output_bytes: Number(document.getElementById("tpl-max-output").value || "262144")
+      };
+      if (!isPatch) return payload;
+      return {
+        description: payload.description,
+        risk_level: payload.risk_level,
+        target_os: payload.target_os,
+        params_schema: payload.params_schema,
+        default_timeout_sec: payload.default_timeout_sec,
+        max_timeout_sec: payload.max_timeout_sec,
+        max_output_bytes: payload.max_output_bytes,
+        enabled: document.getElementById("tpl-enabled").value === "" ? undefined : document.getElementById("tpl-enabled").value === "true"
+      };
+    }
+
+    async function invokeTemplate() {
+      if (!state.selectedTemplateId) {
+        throw new Error("请先选择模板");
+      }
+      const body = await api(`/v1/command-templates/${encodeURIComponent(state.selectedTemplateId)}:invoke`, {
+        method: "POST",
+        body: JSON.stringify({
+          targets: { node_ids: splitCSV(document.getElementById("tpl-invoke-nodes").value) },
+          params: JSON.parse(document.getElementById("tpl-invoke-params").value || "{}"),
+          timeout_sec: Number(document.getElementById("tpl-invoke-timeout").value || "10"),
+          async: document.getElementById("tpl-invoke-async").value === "true"
+        })
+      });
+      document.getElementById("template-invoke-result").textContent = pretty(body);
+      if (body?.invocation?.id) {
+        state.selectedInvocationId = body.invocation.id;
+      }
+      await loadInvocations();
+    }
+
+    async function loadInvocations() {
+      const qs = new URLSearchParams();
+      const status = document.getElementById("inv-filter-status").value;
+      const action = document.getElementById("inv-filter-action").value.trim();
+      if (status) qs.set("status", status);
+      if (action) qs.set("action", action);
+      const body = await api(`/v1/invocations${qs.toString() ? `?${qs}` : ""}`);
+      state.invocations = body.items || [];
+      const list = document.getElementById("invocations");
+      list.innerHTML = "";
+      if (!state.invocations.length) {
+        list.innerHTML = "<div class='hint'>还没有 invocation。</div>";
+        return;
+      }
+      state.invocations.forEach((inv) => {
+        const button = document.createElement("button");
+        button.className = inv.id === state.selectedInvocationId ? "active" : "";
+        button.innerHTML = `<strong>${inv.action}</strong><span class="badge">${inv.status}</span><div class="hint">${inv.id}</div>`;
+        button.addEventListener("click", () => selectInvocation(inv.id));
+        list.appendChild(button);
+      });
+      if (!state.selectedInvocationId) {
+        await selectInvocation(state.invocations[0].id);
+      }
+    }
+
+    async function selectInvocation(invocationID) {
+      state.selectedInvocationId = invocationID;
+      await loadSelectedInvocation();
+      await loadInvocations();
+    }
+
+    async function loadSelectedInvocation() {
+      if (!state.selectedInvocationId) {
+        throw new Error("请先选择 invocation");
+      }
+      const detail = await api(`/v1/invocations/${encodeURIComponent(state.selectedInvocationId)}`);
+      const results = await api(`/v1/invocations/${encodeURIComponent(state.selectedInvocationId)}/results`);
+      document.getElementById("invocation-detail").textContent = pretty(detail);
+      document.getElementById("invocation-results").textContent = pretty(results.items || []);
+    }
+
+    async function createInvocation() {
+      const body = await api("/v1/invocations", {
+        method: "POST",
+        body: JSON.stringify({
+          action: document.getElementById("inv-action").value.trim(),
+          action_type: document.getElementById("inv-action-type").value,
+          targets: { node_ids: selectedNodeIDs() },
+          params: JSON.parse(document.getElementById("inv-params").value || "{}"),
+          timeout_sec: Number(document.getElementById("inv-timeout").value || "10"),
+          async: document.getElementById("inv-async").value === "true"
+        })
+      });
+      document.getElementById("create-invocation-result").textContent = pretty(body);
+      if (body?.invocation?.id) {
+        state.selectedInvocationId = body.invocation.id;
+      }
+      await loadInvocations();
+    }
+
+    async function cancelInvocation() {
+      if (!state.selectedInvocationId) {
+        throw new Error("请先选择 invocation");
+      }
+      const body = await api(`/v1/invocations/${encodeURIComponent(state.selectedInvocationId)}:cancel`, {
+        method: "POST",
+        body: JSON.stringify({})
+      });
+      document.getElementById("invocation-detail").textContent = pretty(body.invocation);
+      await loadInvocations();
+      await loadSelectedInvocation();
+    }
+
+    async function loadAuditEvents() {
+      const qs = new URLSearchParams();
+      const action = document.getElementById("audit-filter-action").value.trim();
+      const decision = document.getElementById("audit-filter-decision").value;
+      if (action) qs.set("action", action);
+      if (decision) qs.set("decision", decision);
+      const body = await api(`/v1/audit/events${qs.toString() ? `?${qs}` : ""}`);
+      state.audits = body.items || [];
+      const list = document.getElementById("audit-events");
+      list.innerHTML = "";
+      if (!state.audits.length) {
+        list.innerHTML = "<div class='hint'>还没有审计事件。</div>";
+        return;
+      }
+      state.audits.forEach((evt) => {
+        const button = document.createElement("button");
+        button.className = evt.id === state.selectedAuditId ? "active" : "";
+        button.innerHTML = `<strong>${evt.action}</strong><span class="badge">${evt.decision}</span><div class="hint">${evt.id}</div>`;
+        button.addEventListener("click", () => selectAuditEvent(evt.id));
+        list.appendChild(button);
+      });
+      if (!state.selectedAuditId) {
+        await selectAuditEvent(state.audits[0].id);
+      }
+    }
+
+    async function selectAuditEvent(auditID) {
+      state.selectedAuditId = auditID;
+      const evt = await api(`/v1/audit/events/${encodeURIComponent(auditID)}`);
+      document.getElementById("audit-detail").textContent = pretty(evt);
+      await loadAuditEvents();
+    }
+
+    refreshActiveTab();
+  </script>
+</body>
+</html>

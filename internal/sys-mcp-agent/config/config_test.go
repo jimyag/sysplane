@@ -84,3 +84,18 @@ func TestLoad_MissingFile(t *testing.T) {
 		t.Fatal("expected error for missing file")
 	}
 }
+
+func TestLoad_InvalidAllowedCommand(t *testing.T) {
+	path := writeConfig(t, t.TempDir(), `
+upstream:
+  address: "localhost:18890"
+  token: "secret"
+security:
+  allowed_commands:
+    - "echo"
+`)
+	_, err := config.Load(path)
+	if err == nil {
+		t.Fatal("expected error for relative allowed command")
+	}
+}

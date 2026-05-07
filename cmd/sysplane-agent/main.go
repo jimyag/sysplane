@@ -1,27 +1,27 @@
-// sys-mcp-proxy aggregates multiple agents within an IDC and relays their
-// tool requests/responses to sys-mcp-center.
 package main
 
 import (
 	"context"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
+
 	_ "github.com/jimmicro/version"
 
-	proxy "github.com/jimyag/sys-mcp/internal/sys-mcp-proxy"
+	agent "github.com/jimyag/sys-mcp/internal/sys-mcp-agent"
 )
 
 var defaultConfigPaths = []string{
-	"./sys-mcp-proxy.yaml",
-	"/etc/sys-mcp/proxy.yaml",
+	"./sysplane-agent.yaml",
+	"/etc/sysplane/agent.yaml",
 }
 
 func main() {
 	var configPath string
-	flag.StringVar(&configPath, "config", "", "path to proxy config file")
+	flag.StringVar(&configPath, "config", "", "path to agent config file")
 	flag.Parse()
 
 	if configPath == "" {
@@ -40,8 +40,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	if err := proxy.Run(ctx, configPath); err != nil && err != context.Canceled {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+	if err := agent.Run(ctx, configPath); err != nil && err != context.Canceled {
+		slog.Error("agent exited with error", "error", err)
 		os.Exit(1)
 	}
 }

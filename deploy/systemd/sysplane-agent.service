@@ -1,20 +1,23 @@
 [Unit]
-Description=sys-mcp-proxy — MCP IDC aggregation proxy
+Description=sysplane-agent — Sysplane physical machine resource agent
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/sys-mcp-proxy --config /etc/sys-mcp/proxy.yaml
+ExecStart=/usr/local/bin/sysplane-agent --config /etc/sysplane/agent.yaml
 Restart=on-failure
 RestartSec=5s
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=sys-mcp-proxy
+SyslogIdentifier=sysplane-agent
 
+# Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
+ProtectHome=read-only
 PrivateTmp=true
+ReadOnlyPaths=/
 
 [Install]
 WantedBy=multi-user.target

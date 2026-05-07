@@ -4,7 +4,6 @@ package center
 import (
 	"context"
 	"log/slog"
-	"strings"
 	"time"
 
 	"google.golang.org/grpc/codes"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/jimyag/sys-mcp/api/tunnel"
 	pkgstream "github.com/jimyag/sys-mcp/internal/pkg/stream"
+	"github.com/jimyag/sys-mcp/internal/pkg/tokenauth"
 	"github.com/jimyag/sys-mcp/internal/sys-mcp-center/registry"
 	"github.com/jimyag/sys-mcp/internal/sys-mcp-center/router"
 	"github.com/jimyag/sys-mcp/internal/sys-mcp-center/store"
@@ -28,24 +28,24 @@ type AgentPersister interface {
 // TunnelServiceServer implements the gRPC TunnelService for center.
 type TunnelServiceServer struct {
 	tunnel.UnimplementedTunnelServiceServer
-	reg         *registry.Registry
-	router      *router.Router
-	agentTokens []string
-	logger      *slog.Logger
-	persister   AgentPersister // optional; nil if database is disabled
-	instanceID  string         // center instance ID for PG writes
+	reg        *registry.Registry
+	router     *router.Router
+	tokens     *tokenauth.Catalog
+	logger     *slog.Logger
+	persister  AgentPersister // optional; nil if database is disabled
+	instanceID string         // center instance ID for PG writes
 }
 
 // NewTunnelServiceServer creates a TunnelServiceServer.
 // persister and instanceID are optional; pass nil/"" to disable PG writes.
-func NewTunnelServiceServer(reg *registry.Registry, rtr *router.Router, agentTokens []string, logger *slog.Logger, persister AgentPersister, instanceID string) *TunnelServiceServer {
+func NewTunnelServiceServer(reg *registry.Registry, rtr *router.Router, tokens *tokenauth.Catalog, logger *slog.Logger, persister AgentPersister, instanceID string) *TunnelServiceServer {
 	return &TunnelServiceServer{
-		reg:         reg,
-		router:      rtr,
-		agentTokens: agentTokens,
-		logger:      logger,
-		persister:   persister,
-		instanceID:  instanceID,
+		reg:        reg,
+		router:     rtr,
+		tokens:     tokens,
+		logger:     logger,
+		persister:  persister,
+		instanceID: instanceID,
 	}
 }
 
@@ -61,8 +61,8 @@ func (s *TunnelServiceServer) Connect(srv tunnel.TunnelService_ConnectServer) er
 		return status.Error(codes.InvalidArgument, "first message must be RegisterRequest")
 	}
 
-	// Authenticate.
-	if !s.validToken(req.Token) {
+	nodeType := registrationDomain(req.NodeType)
+	if _, err := s.tokens.AuthenticateRegistration(nodeType, req.Token); err != nil {
 		_ = srv.Send(&tunnel.TunnelMessage{
 			Payload: &tunnel.TunnelMessage_RegisterAck{
 				RegisterAck: &tunnel.RegisterAck{Success: false, Message: "invalid token"},
@@ -75,16 +75,12 @@ func (s *TunnelServiceServer) Connect(srv tunnel.TunnelService_ConnectServer) er
 	ts := pkgstream.WrapServerStream(streamID, srv)
 
 	// Register the agent.
-	nodeType := "agent"
-	if req.NodeType == tunnel.NodeType_NODE_TYPE_PROXY {
-		nodeType = "proxy"
-	}
 	rec := &registry.AgentRecord{
 		Hostname:      req.Hostname,
 		IP:            req.Ip,
 		OS:            req.Os,
 		AgentVersion:  req.AgentVersion,
-		NodeType:      nodeType,
+		NodeType:      string(nodeType),
 		ProxyPath:     req.ProxyPath,
 		RegisteredAt:  time.Now(),
 		LastHeartbeat: time.Now(),
@@ -99,7 +95,7 @@ func (s *TunnelServiceServer) Connect(srv tunnel.TunnelService_ConnectServer) er
 			IP:            req.Ip,
 			OS:            req.Os,
 			AgentVersion:  req.AgentVersion,
-			NodeType:      nodeType,
+			NodeType:      string(nodeType),
 			ProxyPath:     req.ProxyPath,
 			CenterID:      s.instanceID,
 			Status:        "online",
@@ -196,10 +192,7 @@ func (s *TunnelServiceServer) Connect(srv tunnel.TunnelService_ConnectServer) er
 					}(hostname)
 				}
 			} else {
-				downstreamNodeType := "agent"
-				if p.RegisterRequest.NodeType == tunnel.NodeType_NODE_TYPE_PROXY {
-					downstreamNodeType = "proxy"
-				}
+				downstreamNodeType := string(registrationDomain(p.RegisterRequest.NodeType))
 				now := time.Now()
 				downstreamRec := &registry.AgentRecord{
 					Hostname:      hostname,
@@ -243,12 +236,9 @@ func (s *TunnelServiceServer) Connect(srv tunnel.TunnelService_ConnectServer) er
 	}
 }
 
-func (s *TunnelServiceServer) validToken(token string) bool {
-	token = strings.TrimPrefix(token, "Bearer ")
-	for _, t := range s.agentTokens {
-		if t == token {
-			return true
-		}
+func registrationDomain(nodeType tunnel.NodeType) tokenauth.Domain {
+	if nodeType == tunnel.NodeType_NODE_TYPE_PROXY {
+		return tokenauth.DomainProxy
 	}
-	return false
+	return tokenauth.DomainAgent
 }

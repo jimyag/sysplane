@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jimyag/sys-mcp/api/tunnel"
+	"github.com/jimyag/sys-mcp/internal/pkg/tokenauth"
 	proxyreg "github.com/jimyag/sys-mcp/internal/sys-mcp-proxy/registry"
 	proxytunnel "github.com/jimyag/sys-mcp/internal/sys-mcp-proxy/tunnel"
 )
@@ -55,10 +56,14 @@ func TestDeliverCancelRequest_ForwardsToCorrectAgent(t *testing.T) {
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	fakeUp := &fakeUpstream{}
 	agentStream := &fakeAgentStream{}
+	catalog, err := tokenauth.NewCatalog(nil, nil, []string{"token-abc"}, []string{"proxy-token"})
+	if err != nil {
+		t.Fatalf("NewCatalog: %v", err)
+	}
 
 	svc := proxytunnel.NewDownstreamService(
 		reg,
-		[]string{"token-abc"},
+		catalog,
 		fakeUp,
 		"proxy-01",
 		logger,
@@ -125,10 +130,14 @@ func TestDeliverCancelRequest_UnknownRequestIDIsNoop(t *testing.T) {
 	reg := proxyreg.New()
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	fakeUp := &fakeUpstream{}
+	catalog, err := tokenauth.NewCatalog(nil, nil, []string{"token"}, []string{"proxy-token"})
+	if err != nil {
+		t.Fatalf("NewCatalog: %v", err)
+	}
 
 	svc := proxytunnel.NewDownstreamService(
 		reg,
-		[]string{"token"},
+		catalog,
 		fakeUp,
 		"proxy-01",
 		logger,

@@ -9,7 +9,9 @@ func TestValidate_RequireInternalAddressWhenDatabaseAndHAEnabled(t *testing.T) {
 			GRPCAddress: ":18890",
 		},
 		Auth: Auth{
-			AgentTokens: []string{"tok"},
+			ClientTokens: []string{"client"},
+			AgentTokens:  []string{"agent"},
+			ProxyTokens:  []string{"proxy"},
 		},
 		Database: Database{
 			Enable: true,
@@ -28,7 +30,9 @@ func TestValidate_RequireInternalAddressWhenDatabaseAndHAEnabled(t *testing.T) {
 func TestValidate_AcceptInternalAddressWhenDatabaseEnabled(t *testing.T) {
 	cfg := &CenterConfig{
 		Auth: Auth{
-			AgentTokens: []string{"tok"},
+			ClientTokens: []string{"client"},
+			AgentTokens:  []string{"agent"},
+			ProxyTokens:  []string{"proxy"},
 		},
 		Database: Database{
 			Enable: true,
@@ -42,5 +46,19 @@ func TestValidate_AcceptInternalAddressWhenDatabaseEnabled(t *testing.T) {
 
 	if err := validate(cfg); err != nil {
 		t.Fatalf("expected validate to accept explicit ha.internal_address, got %v", err)
+	}
+}
+
+func TestValidate_RejectDuplicateTokensAcrossDomains(t *testing.T) {
+	cfg := &CenterConfig{
+		Auth: Auth{
+			ClientTokens: []string{"dup"},
+			AgentTokens:  []string{"dup"},
+			ProxyTokens:  []string{"proxy"},
+		},
+	}
+
+	if err := validate(cfg); err == nil {
+		t.Fatal("expected duplicate token validation error")
 	}
 }

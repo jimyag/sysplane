@@ -3,6 +3,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -71,6 +72,10 @@ func (r *Router) Send(ctx context.Context, rec *registry.AgentRecord, requestID,
 				CancelRequest: &tunnel.CancelRequest{RequestId: requestID},
 			},
 		})
+		if errors.Is(ctx.Err(), context.Canceled) {
+			status = "canceled"
+			return "", fmt.Errorf("router: canceled waiting for response from %s (request %s)", rec.Hostname, requestID)
+		}
 		return "", fmt.Errorf("router: timeout waiting for response from %s (request %s)", rec.Hostname, requestID)
 	case msg := <-slot.ch:
 		switch p := msg.Payload.(type) {
@@ -140,4 +145,3 @@ func (r *Router) DeliverFromMessage(msg *tunnel.TunnelMessage) {
 	}
 	r.Deliver(requestID, msg)
 }
-

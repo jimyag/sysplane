@@ -1,5 +1,5 @@
-# sys-mcp-proxy 配置示例
-# 放置路径：/etc/sys-mcp/proxy.yaml 或 ./sys-mcp-proxy.yaml
+# sysplane-proxy 配置示例
+# 放置路径：/etc/sysplane/proxy.yaml 或 ./sysplane-proxy.yaml
 
 # hostname 是 proxy 在 center 中的唯一标识。建议以 IDC 或机房命名。
 hostname: "proxy-idc-beijing"
@@ -23,9 +23,12 @@ upstream:
     ca_file:   ""
 
 auth:
-  # agent_tokens 是下游 agent/proxy 使用的 Bearer Token 列表。
+  # agent_tokens 是下游 agent 使用的 Bearer Token 列表。
   agent_tokens:
     - "your-agent-token-here"
+  # proxy_tokens 是下游 proxy 使用的 Bearer Token 列表。
+  proxy_tokens:
+    - "your-downstream-proxy-token-here"
 
 logging:
   level: "info"   # debug | info | warn | error

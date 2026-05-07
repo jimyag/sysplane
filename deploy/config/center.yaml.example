@@ -1,5 +1,5 @@
-# sys-mcp-center 配置示例
-# 放置路径：/etc/sys-mcp/center.yaml 或 ./sys-mcp-center.yaml
+# sysplane-center 配置示例
+# 放置路径：/etc/sysplane/center.yaml 或 ./sysplane-center.yaml
 
 listen:
   # http_address 是 MCP/SSE HTTP 端点地址（AI 客户端连接）。
@@ -12,12 +12,18 @@ listen:
     ca_file:   ""
 
 auth:
-  # client_tokens 是 MCP 客户端（AI 助手）使用的 Bearer Token 列表。
+  # client_tokens 是业务调用方使用的 Bearer Token 列表。
   client_tokens:
     - "your-client-token-here"
-  # agent_tokens 是 agent 和 proxy 使用的 Bearer Token 列表。
+  # admin_tokens 是管理面使用的 Bearer Token 列表。
+  admin_tokens:
+    - "your-admin-token-here"
+  # agent_tokens 是 agent 注册使用的 Bearer Token 列表。
   agent_tokens:
     - "your-agent-token-here"
+  # proxy_tokens 是 proxy 注册使用的 Bearer Token 列表。
+  proxy_tokens:
+    - "your-proxy-token-here"
 
 router:
   # request_timeout_sec 是等待 agent 工具响应的最大超时秒数。默认 5。

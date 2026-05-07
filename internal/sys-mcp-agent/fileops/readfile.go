@@ -14,6 +14,8 @@ import (
 type ReadFileParams struct {
 	Path     string `json:"path"`
 	Encoding string `json:"encoding"` // "text" (default) or "base64"
+	Offset   int64  `json:"offset"`
+	Length   int64  `json:"length"`
 	// Head reads the first N lines. 0 = disabled.
 	Head int `json:"head"`
 	// Tail reads the last N lines. 0 = disabled.
@@ -83,6 +85,10 @@ func ReadFile(ctx context.Context, guard *PathGuard, maxFileSizeMB int64, argsJS
 	// Re-seek to start.
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return "", fmt.Errorf("read_file: seek: %w", err)
+	}
+
+	if p.Offset > 0 || p.Length > 0 {
+		return readRange(ctx, p, f, sizeBytes)
 	}
 
 	if p.Tail > 0 {
@@ -182,4 +188,45 @@ func joinLines(lines []string) string {
 		}
 	}
 	return string(buf)
+}
+
+func readRange(ctx context.Context, p ReadFileParams, f *os.File, sizeBytes int64) (string, error) {
+	if p.Offset < 0 {
+		return "", fmt.Errorf("read_file: offset must be >= 0")
+	}
+	if p.Length <= 0 {
+		p.Length = 4096
+	}
+	if _, err := f.Seek(p.Offset, io.SeekStart); err != nil {
+		return "", fmt.Errorf("read_file: seek offset: %w", err)
+	}
+	remaining := sizeBytes - p.Offset
+	if remaining < 0 {
+		remaining = 0
+	}
+	readLen := p.Length
+	if remaining < readLen {
+		readLen = remaining
+	}
+	buf := make([]byte, readLen)
+	n, err := io.ReadFull(f, buf)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return "", fmt.Errorf("read_file: read range: %w", err)
+	}
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	default:
+	}
+	content := string(buf[:n])
+	res := ReadFileResult{
+		Path:      p.Path,
+		Content:   content,
+		Encoding:  "utf-8",
+		Lines:     bytes.Count(buf[:n], []byte{'\n'}) + 1,
+		Truncated: p.Offset+int64(n) < sizeBytes,
+		SizeBytes: sizeBytes,
+	}
+	out, _ := json.Marshal(res)
+	return string(out), nil
 }

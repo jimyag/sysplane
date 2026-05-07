@@ -15,9 +15,10 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	apitunnel "github.com/jimyag/sys-mcp/api/tunnel"
+	"github.com/jimyag/sys-mcp/internal/pkg/logutil"
 	pkgstream "github.com/jimyag/sys-mcp/internal/pkg/stream"
 	"github.com/jimyag/sys-mcp/internal/pkg/tlsconf"
-	"github.com/jimyag/sys-mcp/internal/pkg/logutil"
+	"github.com/jimyag/sys-mcp/internal/pkg/tokenauth"
 	proxycfg "github.com/jimyag/sys-mcp/internal/sys-mcp-proxy/config"
 	proxyreg "github.com/jimyag/sys-mcp/internal/sys-mcp-proxy/registry"
 	proxytunnel "github.com/jimyag/sys-mcp/internal/sys-mcp-proxy/tunnel"
@@ -43,11 +44,15 @@ func Run(ctx context.Context, configPath string) error {
 
 	reg := proxyreg.New()
 	reg.StartOfflineChecker(ctx, 90*time.Second)
+	tokenCatalog, err := tokenauth.NewCatalog(nil, nil, cfg.Auth.AgentTokens, cfg.Auth.ProxyTokens)
+	if err != nil {
+		return fmt.Errorf("build token catalog: %w", err)
+	}
 
 	dialerHolder := &dialerAdapter{}
 	downstreamSvc := proxytunnel.NewDownstreamService(
 		reg,
-		cfg.Auth.AgentTokens,
+		tokenCatalog,
 		dialerHolder,
 		proxyHostname,
 		logger,
@@ -167,4 +172,3 @@ func buildDownstreamCreds(cfg *proxycfg.ProxyConfig) (credentials.TransportCrede
 	}
 	return insecure.NewCredentials(), nil
 }
-

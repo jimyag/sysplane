@@ -73,11 +73,11 @@ jobs:
         run: |
           mkdir -p dist
           go build -trimpath -ldflags="-s -w" \
-            -o dist/sys-mcp-center_${{ matrix.goos }}_${{ matrix.goarch }} \
-            ./cmd/sys-mcp-center
+            -o dist/sysplane-center_${{ matrix.goos }}_${{ matrix.goarch }} \
+            ./cmd/sysplane-center
           go build -trimpath -ldflags="-s -w" \
-            -o dist/sys-mcp-proxy_${{ matrix.goos }}_${{ matrix.goarch }} \
-            ./cmd/sys-mcp-proxy
+            -o dist/sysplane-proxy_${{ matrix.goos }}_${{ matrix.goarch }} \
+            ./cmd/sysplane-proxy
           go build -trimpath -ldflags="-s -w" \
-            -o dist/sys-mcp-agent_${{ matrix.goos }}_${{ matrix.goarch }} \
-            ./cmd/sys-mcp-agent
+            -o dist/sysplane-agent_${{ matrix.goos }}_${{ matrix.goarch }} \
+            ./cmd/sysplane-agent

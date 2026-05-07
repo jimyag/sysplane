@@ -1,12 +1,12 @@
-# sys-mcp-agent 配置示例
-# 放置路径：/etc/sys-mcp/agent.yaml 或 ./sys-mcp-agent.yaml
+# sysplane-agent 配置示例
+# 放置路径：/etc/sysplane/agent.yaml 或 ./sysplane-agent.yaml
 
 # hostname 覆盖 os.Hostname()，作为节点在 center 中的唯一标识。
 # 同一台机器部署多个 agent 实例时必须手动设置，避免冲突。
 hostname: "my-server-01"
 
 upstream:
-  # address 是 sys-mcp-center 或 sys-mcp-proxy 的 gRPC 地址（host:port）。必填。
+  # address 是 sysplane-center 或 sysplane-proxy 的 gRPC 地址（host:port）。必填。
   address: "center.example.com:9090"
   # token 是该 agent 向上游认证用的 Bearer Token。必填。
   token: "your-agent-token-here"
@@ -35,6 +35,9 @@ security:
   allow_privileged_ports: false
   # allowed_ports 非空时，仅允许 proxy_local_api 访问列表中的端口。
   allowed_ports: []
+  # allowed_commands 非空时，允许 command template / run_process 执行的绝对路径白名单。
+  # 默认空列表表示禁用命令执行。
+  allowed_commands: []
 
 logging:
   level: "info"   # debug | info | warn | error

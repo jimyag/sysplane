@@ -17,14 +17,17 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/jimyag/sys-mcp/api/tunnel"
+	"github.com/jimyag/sys-mcp/internal/pkg/logutil"
 	"github.com/jimyag/sys-mcp/internal/pkg/tlsconf"
+	"github.com/jimyag/sys-mcp/internal/pkg/tokenauth"
+	"github.com/jimyag/sys-mcp/internal/sys-mcp-center/admin"
 	centercfg "github.com/jimyag/sys-mcp/internal/sys-mcp-center/config"
 	"github.com/jimyag/sys-mcp/internal/sys-mcp-center/ha"
-	"github.com/jimyag/sys-mcp/internal/pkg/logutil"
-	centermcp "github.com/jimyag/sys-mcp/internal/sys-mcp-center/mcp"
+	"github.com/jimyag/sys-mcp/internal/sys-mcp-center/httpapi"
 	"github.com/jimyag/sys-mcp/internal/sys-mcp-center/registry"
 	"github.com/jimyag/sys-mcp/internal/sys-mcp-center/router"
 	"github.com/jimyag/sys-mcp/internal/sys-mcp-center/store"
+	"github.com/jimyag/sys-mcp/internal/sys-mcp-center/webui"
 )
 
 func Run(ctx context.Context, configPath string) error {
@@ -39,6 +42,15 @@ func Run(ctx context.Context, configPath string) error {
 
 	reg := registry.New()
 	rtr := router.New(cfg.Router.RequestTimeoutSec)
+	tokenCatalog, err := tokenauth.NewCatalog(
+		cfg.Auth.ClientTokens,
+		cfg.Auth.AdminTokens,
+		cfg.Auth.AgentTokens,
+		cfg.Auth.ProxyTokens,
+	)
+	if err != nil {
+		return fmt.Errorf("build token catalog: %w", err)
+	}
 
 	var pgOfflineCallback func(context.Context, string)
 
@@ -69,7 +81,7 @@ func Run(ctx context.Context, configPath string) error {
 		persister = st
 	}
 
-	tunnelSvc := NewTunnelServiceServer(reg, rtr, cfg.Auth.AgentTokens, logger, persister, instanceID)
+	tunnelSvc := NewTunnelServiceServer(reg, rtr, tokenCatalog, logger, persister, instanceID)
 
 	grpcCreds, err := buildGRPCServerOption(cfg, logger)
 	if err != nil {
@@ -78,7 +90,7 @@ func Run(ctx context.Context, configPath string) error {
 	grpcServer := grpc.NewServer(grpcCreds)
 	tunnel.RegisterTunnelServiceServer(grpcServer, tunnelSvc)
 
-	var callLogger centermcp.CallLogger
+	var callLogger admin.CallLogger
 	if st != nil {
 		callLogger = st
 	}
@@ -87,15 +99,24 @@ func Run(ctx context.Context, configPath string) error {
 	// Assigning a nil *ha.RouterBridge directly to RemoteForwarder would produce a
 	// non-nil interface value (type != nil, pointer == nil), causing a nil-pointer
 	// panic the first time ForwardIfNeeded is called.
-	var fwd centermcp.RemoteForwarder
+	var fwd admin.RemoteForwarder
 	if routerBridge != nil {
 		fwd = routerBridge
 	}
 
-	mcpHandler := centermcp.NewMCPHandler(reg, rtr, cfg.Auth.ClientTokens, fwd, callLogger, instanceID)
+	adminSvc := admin.NewService(reg, rtr, fwd, callLogger, instanceID)
+	apiHandler := httpapi.NewHandler(reg, tokenCatalog, adminSvc)
+	webUIHandler := webui.NewHandler()
 	httpMux := http.NewServeMux()
 	httpMux.HandleFunc("/internal/forward", makeInternalForwardHandler(reg, rtr, cfg.HA.InternalSecret, logger, callLogger, instanceID))
-	httpMux.Handle("/", mcpHandler)
+	httpMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/web/", http.StatusTemporaryRedirect)
+	})
+	httpMux.HandleFunc("/web", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/web/", http.StatusTemporaryRedirect)
+	})
+	httpMux.Handle("/web/", http.StripPrefix("/web/", webUIHandler))
+	httpMux.Handle("/v1/", apiHandler)
 
 	g, gCtx := errgroup.WithContext(ctx)
 
@@ -117,7 +138,7 @@ func Run(ctx context.Context, configPath string) error {
 			Addr:    cfg.Listen.HTTPAddress,
 			Handler: httpMux,
 		}
-		logger.Info("HTTP/MCP server listening", "address", cfg.Listen.HTTPAddress)
+		logger.Info("HTTP server listening", "address", cfg.Listen.HTTPAddress)
 		go func() {
 			<-gCtx.Done()
 			shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -208,11 +229,10 @@ func buildGRPCServerOption(cfg *centercfg.CenterConfig, logger *slog.Logger) (gr
 	return grpc.Creds(insecure.NewCredentials()), nil
 }
 
-
 // makeInternalForwardHandler 创建内部工具转发 HTTP 处理器。
 // 其他 center 实例通过 POST /internal/forward 将工具请求转发到本实例。
 // secret 若非空，则要求请求携带 X-Internal-Auth: <secret> 头。
-func makeInternalForwardHandler(reg *registry.Registry, rtr *router.Router, secret string, logger *slog.Logger, callLogger centermcp.CallLogger, instanceID string) http.HandlerFunc {
+func makeInternalForwardHandler(reg *registry.Registry, rtr *router.Router, secret string, logger *slog.Logger, callLogger admin.CallLogger, instanceID string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)

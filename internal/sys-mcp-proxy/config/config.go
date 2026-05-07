@@ -1,14 +1,15 @@
-// Package config holds the configuration structure and loader for sys-mcp-proxy.
+// Package config holds the configuration structure and loader for sysplane-proxy.
 package config
 
 import (
 	"fmt"
 	"os"
 
+	"github.com/jimyag/sys-mcp/internal/pkg/tokenauth"
 	"gopkg.in/yaml.v3"
 )
 
-// ProxyConfig is the root configuration for sys-mcp-proxy.
+// ProxyConfig is the root configuration for sysplane-proxy.
 type ProxyConfig struct {
 	Listen   Listen   `yaml:"listen"`
 	Upstream Upstream `yaml:"upstream"`
@@ -47,8 +48,10 @@ type Upstream struct {
 
 // Auth holds tokens that downstream agents/proxies must present.
 type Auth struct {
-	// AgentTokens are accepted bearer tokens from downstream connections.
+	// AgentTokens are accepted bearer tokens from downstream agent connections.
 	AgentTokens []string `yaml:"agent_tokens"`
+	// ProxyTokens are accepted bearer tokens from downstream proxy connections.
+	ProxyTokens []string `yaml:"proxy_tokens"`
 }
 
 // Logging configures the logger.
@@ -95,6 +98,12 @@ func validate(cfg *ProxyConfig) error {
 	}
 	if len(cfg.Auth.AgentTokens) == 0 {
 		return fmt.Errorf("auth.agent_tokens must have at least one token")
+	}
+	if len(cfg.Auth.ProxyTokens) == 0 {
+		return fmt.Errorf("auth.proxy_tokens must have at least one token")
+	}
+	if _, err := tokenauth.NewCatalog(nil, nil, cfg.Auth.AgentTokens, cfg.Auth.ProxyTokens); err != nil {
+		return fmt.Errorf("auth token validation failed: %w", err)
 	}
 	return nil
 }

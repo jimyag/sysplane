@@ -1,73 +1,65 @@
 # 快速上手指南
 
-本文档介绍如何安装、配置并运行 sys-mcp，让 AI 助手（如 Claude、Cursor 等）能够查询远程物理机的资源信息。
+本文档介绍如何安装、配置并运行 Sysplane，并通过 HTTP API 与内置 WebUI 管理远程物理机。
 
 ---
 
 ## 系统架构概览
 
-```
-AI 助手 (Claude / Cursor / ...)
+```text
+Web / Admin / CLI
         │
-        │  MCP SSE 协议
+        │ HTTP + Bearer Token
         ▼
-  sys-mcp-client（本地 stdio 桥接）
+  sysplane-center（控制面）
         │
-        │  HTTP + Bearer Token
-        ▼
-  sys-mcp-center（中心服务）
-        │
-        │  gRPC 长连接
+        │ gRPC 长连接
         ├──────────────────────────────────────────────┐
         ▼                                              ▼
-  sys-mcp-agent（直连物理机）          sys-mcp-proxy（IDC 聚合代理）
+  sysplane-agent（直连物理机）          sysplane-proxy（IDC 聚合代理）
                                                │
                                                │ gRPC 长连接
-                                          sys-mcp-agent（经代理的物理机）
+                                          sysplane-agent（经代理的物理机）
 ```
 
-- `sys-mcp-agent`：部署在每台物理机上，采集硬件信息、执行文件操作。
-- `sys-mcp-proxy`：可选，部署在 IDC 内网入口，聚合同机房的多台 agent，对外只暴露一条连接到 center。支持多级级联。
-- `sys-mcp-center`：部署在公网或内网可达的位置，作为 MCP 服务端对外提供工具接口。
-- `sys-mcp-client`：运行在用户本地，作为 stdio 桥接，让 AI 助手通过 MCP 协议与 center 通信。
+- `sysplane-agent`：部署在每台物理机上，采集硬件信息、执行文件操作。
+- `sysplane-proxy`：可选，部署在 IDC 内网入口，聚合同机房多台 agent。
+- `sysplane-center`：部署在公网或内网可达的位置，对外提供 HTTP API 与 `/web/` WebUI。
 
 ---
 
 ## 安装
 
-### 方式一：从源码编译
+### 从源码编译
 
 ```bash
 git clone https://github.com/jimyag/sys-mcp.git
 cd sys-mcp
 task build
-# 产物输出到 bin/ 目录
 ```
-
-### 方式二：下载预编译二进制
-
-访问 [Releases 页面](https://github.com/jimyag/sys-mcp/releases) 下载对应平台的二进制文件。
 
 ---
 
 ## 部署步骤
 
-### 1. 部署 sys-mcp-center
+### 1. 部署 sysplane-center
 
-center 是整个系统的核心，应最先启动。
-
-**配置文件** `/etc/sys-mcp/center.yaml`（参考 `deploy/config/center.yaml.example`）：
+配置文件：`/etc/sysplane/center.yaml`
 
 ```yaml
 listen:
-  http_address: ":18880"   # AI 客户端连接的 HTTP/SSE 端口
-  grpc_address: ":18890"   # agent/proxy 连接的 gRPC 端口
+  http_address: ":18880"
+  grpc_address: ":18890"
 
 auth:
   client_tokens:
-    - "your-client-token"  # AI 客户端使用的令牌
+    - "your-client-token"
+  admin_tokens:
+    - "your-admin-token"
   agent_tokens:
-    - "your-agent-token"   # agent/proxy 使用的令牌
+    - "your-agent-token"
+  proxy_tokens:
+    - "your-proxy-token"
 
 router:
   request_timeout_sec: 10
@@ -77,34 +69,22 @@ logging:
   format: "json"
 ```
 
-**启动**：
+启动：
 
 ```bash
-sys-mcp-center -config /etc/sys-mcp/center.yaml
+sysplane-center -config /etc/sysplane/center.yaml
 ```
 
-**systemd 示例**（参考 `deploy/systemd/sys-mcp-center.service`）：
+### 2. 部署 sysplane-agent
 
-```bash
-cp deploy/systemd/sys-mcp-center.service /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now sys-mcp-center
-```
-
----
-
-### 2. 部署 sys-mcp-agent
-
-在每台需要被监控的物理机上部署。
-
-**配置文件** `/etc/sys-mcp/agent.yaml`（参考 `deploy/config/agent.yaml.example`）：
+配置文件：`/etc/sysplane/agent.yaml`
 
 ```yaml
-hostname: "web-server-01"   # 必须唯一，用于在 center 中区分不同机器
+hostname: "web-server-01"
 
 upstream:
-  address: "center.example.com:18890"  # center 的 gRPC 地址
-  token: "your-agent-token"           # 与 center auth.agent_tokens 中的值一致
+  address: "center.example.com:18890"
+  token: "your-agent-token"
 
 tool_timeout_sec: 25
 
@@ -114,163 +94,128 @@ security:
     - /proc
     - /sys
     - /dev
+  allowed_commands:
+    - /bin/echo
 
 logging:
   level: "info"
   format: "json"
 ```
 
-注意：`hostname` 字段必须为每台机器设置不同的值。若不设置，默认使用操作系统的 hostname。
-
-**启动**：
+启动：
 
 ```bash
-sys-mcp-agent -config /etc/sys-mcp/agent.yaml
+sysplane-agent -config /etc/sysplane/agent.yaml
 ```
 
----
+说明：
 
-### 3. 部署 sys-mcp-proxy（可选）
+- `security.allowed_commands` 是 command template 实际可执行命令的绝对路径白名单。
+- 留空时，agent 会拒绝所有命令执行，只保留文件与系统信息类能力。
 
-当某个 IDC 内有大量 agent（几十到几千台），或 agent 无法直连 center 时，部署 proxy 作为聚合层。
+### 3. 部署 sysplane-proxy（可选）
 
-**配置文件** `/etc/sys-mcp/proxy.yaml`（参考 `deploy/config/proxy.yaml.example`）：
+配置文件：`/etc/sysplane/proxy.yaml`
 
 ```yaml
-hostname: "proxy-idc-beijing"  # proxy 的唯一名称
+hostname: "proxy-idc-beijing"
 
 listen:
-  grpc_address: ":18892"  # 本 IDC 内 agent 连接的地址
+  grpc_address: ":18892"
 
 upstream:
-  address: "center.example.com:18890"  # center 的 gRPC 地址
-  token: "your-agent-token"           # 与 center auth.agent_tokens 一致
+  address: "center.example.com:18890"
+  token: "your-proxy-token"
 
 auth:
   agent_tokens:
-    - "idc-agent-token"  # 本 IDC 内 agent 使用的令牌（可与 center 的令牌不同）
+    - "idc-agent-token"
+  proxy_tokens:
+    - "idc-proxy-token"
 
 logging:
   level: "info"
   format: "json"
 ```
 
-**IDC 内 agent 的配置**：将 `upstream.address` 改为 proxy 的地址，token 改为 `idc-agent-token`：
-
-```yaml
-upstream:
-  address: "proxy-idc-beijing:18892"
-  token: "idc-agent-token"
-```
-
-**proxy 级联**（多级代理）：将下级 proxy 的 `upstream.address` 指向上级 proxy 即可，支持任意层级。
-
----
-
-### 4. 配置 sys-mcp-client
-
-`sys-mcp-client` 运行在用户本地，作为 AI 助手与 center 之间的 stdio 桥接。
-
-**配置文件** `~/.config/sys-mcp/client.yaml`（文件权限建议设为 600）：
-
-```yaml
-center:
-  url: "http://center.example.com:18880"
-  token: "your-client-token"
-
-logging:
-  level: "info"
-```
+启动：
 
 ```bash
-chmod 600 ~/.config/sys-mcp/client.yaml
+sysplane-proxy -config /etc/sysplane/proxy.yaml
 ```
 
 ---
 
-## 与 AI 助手集成
+## WebUI
 
-### Claude Desktop
+启动 `sysplane-center` 后，可直接在浏览器访问：
 
-在 Claude Desktop 的 MCP 配置文件（通常为 `~/Library/Application Support/Claude/claude_desktop_config.json`）中添加：
-
-```json
-{
-  "mcpServers": {
-    "sys-mcp": {
-      "command": "/path/to/sys-mcp-client",
-      "args": ["-config", "/Users/yourname/.config/sys-mcp/client.yaml"]
-    }
-  }
-}
+```text
+http://center.example.com:18880/web/
 ```
 
-重启 Claude Desktop 后，AI 就可以使用 sys-mcp 提供的工具查询物理机资源。
+当前 WebUI 支持：
 
-### Cursor
+- 使用 `client token` 或 `admin token` 登录
+- 浏览节点列表、节点详情和能力
+- 执行 `sys:info`、`sys:hardware`、`fs:list`、`fs:read`、`fs:stat`、`fs:write`
+- 管理命令模板（创建、更新、启停、调用）
+- 查看 Invocation 列表、详情、分节点结果，并取消未完成调用
+- 查看审计事件
 
-在 Cursor 设置中添加 MCP Server，命令填写：
-
-```
-/path/to/sys-mcp-client -config /path/to/client.yaml
-```
+v1 范围内这套 Admin 后台已经完整；RBAC、OIDC、审批流和动态策略控制台不在本轮实现范围内。
 
 ---
 
-## 可用工具
+## HTTP API
 
-center 向 AI 暴露以下 8 个工具，所有工具都需要 `target_host` 参数来指定目标机器：
+当前可直接调用的主要接口：
 
-| 工具名 | 说明 |
-|--------|------|
-| `list_agents` | 列出所有已注册的节点（agent / proxy）及其状态 |
-| `get_hardware_info` | 获取目标机器的 CPU、内存、磁盘等硬件信息 |
-| `list_directory` | 列出目标机器的目录内容 |
-| `read_file` | 读取目标机器的文件内容 |
-| `stat_file` | 获取目标机器文件的元数据（大小、权限、修改时间等） |
-| `check_path_exists` | 检查目标机器的路径是否存在 |
-| `search_files` | 在目标机器上搜索文件 |
-| `proxy_local_api` | 代理访问目标机器上的本地 HTTP 服务 |
+- `GET /v1/nodes`
+- `GET /v1/nodes/{id}`
+- `GET /v1/nodes/{id}/capabilities`
+- `POST /v1/nodes/{id}/actions/fs:list`
+- `POST /v1/nodes/{id}/actions/fs:read`
+- `POST /v1/nodes/{id}/actions/fs:stat`
+- `POST /v1/nodes/{id}/actions/fs:write`
+- `POST /v1/nodes/{id}/actions/sys:info`
+- `POST /v1/nodes/{id}/actions/sys:hardware`
+- `GET /v1/command-templates`
+- `POST /v1/command-templates`
+- `GET /v1/command-templates/{id}`
+- `PATCH /v1/command-templates/{id}`
+- `POST /v1/command-templates/{id}:invoke`
+- `GET /v1/invocations`
+- `POST /v1/invocations`
+- `GET /v1/invocations/{id}`
+- `GET /v1/invocations/{id}/results`
+- `POST /v1/invocations/{id}:cancel`
+- `GET /v1/audit/events`
+- `GET /v1/audit/events/{id}`
 
-使用示例（在 AI 对话中）：
-
-```
-请帮我查看 web-server-01 的 CPU 和内存信息
-请列出 db-server-02 的 /var/log 目录
-请检查 app-server-03 的 /etc/hosts 文件内容
-```
-
----
-
-## 安全建议
-
-1. 生产环境中，center 的 HTTP 和 gRPC 端口应启用 TLS。
-2. 令牌（token）应使用足够长的随机字符串（建议 32 位以上）。
-3. `client.yaml` 包含令牌，权限应设为 `600`。
-4. `security.blocked_paths` 中应包含所有敏感系统目录（`/proc`、`/sys`、`/dev`、`/root` 等）。
-5. 如果不需要 `proxy_local_api` 工具，可通过 `security.allowed_ports` 限制可访问的端口。
-
----
-
-## 常见问题
-
-**Q：如何确认 agent 已成功注册？**
-
-调用 `list_agents` 工具，或直接向 center 查询：
+创建模板示例：
 
 ```bash
-curl -H "Authorization: Bearer your-client-token" \
-     http://center.example.com:18880/sse
+curl -X POST \
+  -H 'Authorization: Bearer your-admin-token' \
+  -H 'Content-Type: application/json' \
+  http://center.example.com:18880/v1/command-templates \
+  -d '{
+    "name":"echo.hello",
+    "description":"Echo a fixed string",
+    "risk_level":"readonly",
+    "target_os":["linux"],
+    "executor":{"type":"process","command":"/bin/echo","args":["hello"]},
+    "params_schema":{"type":"object","properties":{},"additionalProperties":false},
+    "default_timeout_sec":10,
+    "max_timeout_sec":30,
+    "max_output_bytes":4096
+  }'
 ```
 
-**Q：agent 断线后会自动重连吗？**
+示例：
 
-会。agent 内置指数退避重连机制，最大重连间隔由 `reconnect_max_delay_sec` 控制（默认 5 秒）。
-
-**Q：proxy 支持几级级联？**
-
-没有硬限制。实际部署中两到三级通常已经足够：`agent → proxy(IDC) → proxy(Region) → center`。
-
-**Q：center 重启后 agent 需要重启吗？**
-
-不需要。agent/proxy 会自动重连，重连后重新执行注册流程。
+```bash
+curl -H 'Authorization: Bearer your-client-token' \
+  http://center.example.com:18880/v1/nodes
+```

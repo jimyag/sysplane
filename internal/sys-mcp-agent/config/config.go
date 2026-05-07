@@ -1,14 +1,16 @@
-// Package config holds the configuration structure and loader for sys-mcp-agent.
+// Package config holds the configuration structure and loader for sysplane-agent.
 package config
 
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
-// AgentConfig is the root configuration for sys-mcp-agent.
+// AgentConfig is the root configuration for sysplane-agent.
 type AgentConfig struct {
 	Upstream Upstream `yaml:"upstream"`
 	Security Security `yaml:"security"`
@@ -51,6 +53,8 @@ type Security struct {
 	AllowPrivilegedPorts bool `yaml:"allow_privileged_ports"`
 	// AllowedPorts, if non-empty, restricts proxy_local_api to these ports.
 	AllowedPorts []int `yaml:"allowed_ports"`
+	// AllowedCommands, if non-empty, whitelists absolute executable paths for run_process.
+	AllowedCommands []string `yaml:"allowed_commands"`
 }
 
 // Logging configures the logger.
@@ -103,6 +107,15 @@ func validate(cfg *AgentConfig) error {
 	}
 	if cfg.Upstream.Token == "" {
 		return fmt.Errorf("upstream.token is required")
+	}
+	for _, command := range cfg.Security.AllowedCommands {
+		command = strings.TrimSpace(command)
+		if command == "" {
+			return fmt.Errorf("security.allowed_commands must not contain empty values")
+		}
+		if !filepath.IsAbs(command) {
+			return fmt.Errorf("security.allowed_commands value %q must be an absolute path", command)
+		}
 	}
 	return nil
 }

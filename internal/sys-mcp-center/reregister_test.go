@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/jimyag/sys-mcp/api/tunnel"
+	"github.com/jimyag/sys-mcp/internal/pkg/tokenauth"
 	center "github.com/jimyag/sys-mcp/internal/sys-mcp-center"
 	"github.com/jimyag/sys-mcp/internal/sys-mcp-center/registry"
 	"github.com/jimyag/sys-mcp/internal/sys-mcp-center/router"
@@ -24,13 +25,17 @@ const bufSize = 1 << 20 // 1 MiB
 
 // newTestServer spins up an in-process gRPC server with TunnelServiceServer
 // and returns a connected client plus the registry for assertions.
-func newTestServer(t *testing.T, tokens []string) (tunnel.TunnelServiceClient, *registry.Registry, func()) {
+func newTestServer(t *testing.T, agentTokens, proxyTokens []string) (tunnel.TunnelServiceClient, *registry.Registry, func()) {
 	t.Helper()
 
 	reg := registry.New()
 	rtr := router.New(5)
 	logger := slog.Default()
-	svc := center.NewTunnelServiceServer(reg, rtr, tokens, logger, nil, "")
+	catalog, err := tokenauth.NewCatalog([]string{"client"}, nil, agentTokens, proxyTokens)
+	if err != nil {
+		t.Fatalf("NewCatalog: %v", err)
+	}
+	svc := center.NewTunnelServiceServer(reg, rtr, catalog, logger, nil, "")
 
 	lis := bufconn.Listen(bufSize)
 	srv := grpc.NewServer()
@@ -99,7 +104,7 @@ func register(t *testing.T, stream tunnel.TunnelService_ConnectClient, hostname,
 }
 
 func TestTunnelSvc_AgentReregistration(t *testing.T) {
-	client, reg, cleanup := newTestServer(t, []string{"tok"})
+	client, reg, cleanup := newTestServer(t, []string{"tok"}, []string{"proxy"})
 	defer cleanup()
 
 	// ── First connection ──────────────────────────────────────────────────────
@@ -169,7 +174,7 @@ func TestTunnelSvc_AgentReregistration(t *testing.T) {
 }
 
 func TestTunnelSvc_InvalidToken(t *testing.T) {
-	client, reg, cleanup := newTestServer(t, []string{"tok"})
+	client, reg, cleanup := newTestServer(t, []string{"tok"}, []string{"proxy"})
 	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -238,7 +243,11 @@ func TestTunnelSvc_RegisterWaitsForInitialPersist(t *testing.T) {
 	rtr := router.New(5)
 	logger := slog.Default()
 	p := &blockingPersister{release: make(chan struct{})}
-	svc := center.NewTunnelServiceServer(reg, rtr, []string{"tok"}, logger, p, "center-01")
+	catalog, err := tokenauth.NewCatalog([]string{"client"}, nil, []string{"tok"}, []string{"proxy"})
+	if err != nil {
+		t.Fatalf("NewCatalog: %v", err)
+	}
+	svc := center.NewTunnelServiceServer(reg, rtr, catalog, logger, p, "center-01")
 
 	lis := bufconn.Listen(bufSize)
 	srv := grpc.NewServer()

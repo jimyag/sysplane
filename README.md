@@ -1,6 +1,8 @@
-# sys-mcp
+# Sysplane
 
-sys-mcp 是一个用 Go 编写的分布式 MCP（Model Context Protocol）平台，让 AI 助手（Claude、Cursor 等）能够实时查询远程物理机的硬件资源、文件系统信息，并代理访问机器上的本地 HTTP 服务。
+Sysplane 是一个用 Go 编写的分布式远程访问控制平面，让 Web/Admin、CLI 和自动化脚本能够以统一的 HTTP API 访问远程物理机。
+
+当前仓库已经提供嵌入在 `sysplane-center` 内的完整 v1 Web Admin，访问路径为 `/web/`。它直接复用 `/v1/...` API，支持节点浏览、命令模板管理、Invocation 执行中心和审计查询。
 
 ---
 
@@ -18,16 +20,16 @@ sys-mcp 是一个用 Go 编写的分布式 MCP（Model Context Protocol）平台
 
 ```mermaid
 graph TD
-    AI["AI 助手\n(Claude / Cursor)"]
-    Client["sys-mcp-client\n本地 stdio 桥接"]
-    Center["sys-mcp-center\n中心服务\nHTTP/SSE :18880\ngRPC :18890"]
-    Proxy["sys-mcp-proxy\n可选 IDC 聚合层\ngRPC :18892"]
-    Agent1["sys-mcp-agent\n物理机 A"]
-    Agent2["sys-mcp-agent\n物理机 B"]
-    Agent3["sys-mcp-agent\n物理机 C（经 proxy）"]
+    WEB["Web / Admin"]
+    CLI["CLI / Automation"]
+    Center["sysplane-center\n中心服务\nHTTP :18880\ngRPC :18890"]
+    Proxy["sysplane-proxy\n可选 IDC 聚合层\ngRPC :18892"]
+    Agent1["sysplane-agent\n物理机 A"]
+    Agent2["sysplane-agent\n物理机 B"]
+    Agent3["sysplane-agent\n物理机 C（经 proxy）"]
 
-    AI -->|MCP stdio| Client
-    Client -->|HTTP SSE + Bearer Token| Center
+    WEB -->|HTTP + Bearer Token| Center
+    CLI -->|HTTP + Bearer Token| Center
     Agent1 -->|gRPC 长连接| Center
     Agent2 -->|gRPC 长连接| Center
     Agent3 -->|gRPC 长连接| Proxy
@@ -38,10 +40,9 @@ graph TD
 
 | 组件 | 部署位置 | 职责 |
 |------|----------|------|
-| `sys-mcp-agent` | 每台被监控的物理机 | 采集硬件信息、执行文件操作、代理本地 HTTP |
-| `sys-mcp-proxy` | IDC 内网入口（可选） | 聚合同机房多台 agent，支持多级级联 |
-| `sys-mcp-center` | 公网或内网可达位置 | MCP 服务端，管理所有 agent 连接，路由工具调用 |
-| `sys-mcp-client` | 用户本地机器 | stdio MCP 桥接，让 AI 助手与 center 通信 |
+| `sysplane-agent` | 每台被监控的物理机 | 采集硬件信息、执行文件操作、代理本地 HTTP |
+| `sysplane-proxy` | IDC 内网入口（可选） | 聚合同机房多台 agent，支持多级级联 |
+| `sysplane-center` | 公网或内网可达位置 | 控制面服务，提供 HTTP API 与 WebUI，管理所有 agent 连接 |
 
 ---
 
@@ -62,43 +63,79 @@ task build
 
 ```bash
 # 1. 启动 center
-bin/sys-mcp-center -config deploy/config/center.yaml.example
+bin/sysplane-center -config deploy/config/center.yaml.example
 
 # 2. 启动 agent（另一个终端）
-bin/sys-mcp-agent -config deploy/config/agent.yaml.example
+bin/sysplane-agent -config deploy/config/agent.yaml.example
 
-# 3. 配置 AI 助手（以 Claude Desktop 为例）
-# 在 ~/Library/Application Support/Claude/claude_desktop_config.json 中添加：
-# {
-#   "mcpServers": {
-#     "sys-mcp": {
-#       "command": "/path/to/bin/sys-mcp-client",
-#       "args": ["-config", "~/.config/sys-mcp/client.yaml"]
-#     }
-#   }
-# }
+# 3. 打开 WebUI
+# http://127.0.0.1:18880/web/
 ```
 
 详细部署说明见 [docs/usage/getting-started.md](docs/usage/getting-started.md)。
 
 ---
 
-## 可用工具
+## v1 管理面能力
 
-center 向 AI 暴露以下 8 个工具：
+当前 `sysplane-center` 已提供以下管理能力：
 
-| 工具名 | 说明 |
-|--------|------|
-| `list_agents` | 列出所有已注册节点及其状态 |
-| `get_hardware_info` | 获取目标机器的 CPU、内存、磁盘信息 |
-| `list_directory` | 列出目录内容 |
-| `read_file` | 读取文件内容 |
-| `stat_file` | 获取文件元数据（大小、权限、修改时间） |
-| `check_path_exists` | 检查路径是否存在 |
-| `search_file_content` | 在文件中搜索内容 |
-| `proxy_local_api` | 代理访问目标机器上的本地 HTTP 服务 |
+| 能力 | 说明 |
+|------|------|
+| 节点视图 | 浏览节点、能力、路由路径，并执行内置动作 |
+| 命令模板 | 创建、更新、启停和调用 `command template` |
+| Invocation 执行中心 | 统一执行内置动作和命令模板，支持同步/异步、结果查询和取消 |
+| 审计查询 | 查看执行与模板变更相关的审计事件 |
 
-所有工具（除 `list_agents` 外）都需要 `target_host` 参数指定目标机器。
+命令模板的实际执行仍受 agent 侧白名单控制：`security.allowed_commands` 为空时，agent 默认拒绝执行任何命令。
+
+---
+
+## WebUI
+
+启动 `sysplane-center` 后，可直接在浏览器访问：
+
+```text
+http://<center-host>:<http-port>/web/
+```
+
+WebUI 当前支持：
+
+- 使用 `client token` 或 `admin token` 登录
+- 浏览节点、能力与快捷动作
+- 管理命令模板（创建 / 更新 / 启停 / 调用）
+- 查看 Invocation 列表、详情、结果并取消执行
+- 查看审计事件
+
+当前这套后台按 v1 范围已完整；RBAC、OIDC、审批流和动态策略控制台仍不在本轮范围内。
+
+---
+
+## HTTP API
+
+当前主要接口包括：
+
+- `GET /v1/nodes`
+- `GET /v1/nodes/{id}`
+- `GET /v1/nodes/{id}/capabilities`
+- `POST /v1/nodes/{id}/actions/fs:list`
+- `POST /v1/nodes/{id}/actions/fs:read`
+- `POST /v1/nodes/{id}/actions/fs:stat`
+- `POST /v1/nodes/{id}/actions/fs:write`
+- `POST /v1/nodes/{id}/actions/sys:info`
+- `POST /v1/nodes/{id}/actions/sys:hardware`
+- `GET /v1/command-templates`
+- `POST /v1/command-templates`
+- `GET /v1/command-templates/{id}`
+- `PATCH /v1/command-templates/{id}`
+- `POST /v1/command-templates/{id}:invoke`
+- `GET /v1/invocations`
+- `POST /v1/invocations`
+- `GET /v1/invocations/{id}`
+- `GET /v1/invocations/{id}/results`
+- `POST /v1/invocations/{id}:cancel`
+- `GET /v1/audit/events`
+- `GET /v1/audit/events/{id}`
 
 ---
 
@@ -110,10 +147,9 @@ api/
   tunnel/         — 生成的 Go gRPC 代码（勿手动修改）
 bin/              — 编译产物（不提交到 git）
 cmd/
-  sys-mcp-agent/  — agent 二进制入口
-  sys-mcp-center/ — center 二进制入口
-  sys-mcp-client/ — client 二进制入口
-  sys-mcp-proxy/  — proxy 二进制入口
+  sysplane-agent/  — agent 二进制入口
+  sysplane-center/ — center 二进制入口
+  sysplane-proxy/  — proxy 二进制入口
 deploy/
   config/         — 配置文件示例
   systemd/        — systemd 服务单元文件
@@ -124,10 +160,9 @@ docs/
   usage/          — 用户使用指南
 internal/
   pkg/            — 跨服务公共库（stream 重连器、tlsconf）
-  sys-mcp-agent/  — agent 内部实现
-  sys-mcp-center/ — center 内部实现
-  sys-mcp-client/ — client 内部实现
-  sys-mcp-proxy/  — proxy 内部实现
+  sysplane-agent/  — agent 内部实现
+  sysplane-center/ — center 内部实现
+  sysplane-proxy/  — proxy 内部实现
 ```
 
 ---
@@ -142,7 +177,7 @@ task build
 task test
 
 # 静态检查
-task vet
+task lint
 ```
 
 ### 更新 Proto
@@ -170,7 +205,6 @@ protoc \
 | [docs/design/sys-mcp-agent.md](docs/design/sys-mcp-agent.md) | agent 详细设计 |
 | [docs/design/sys-mcp-center.md](docs/design/sys-mcp-center.md) | center 详细设计 |
 | [docs/design/sys-mcp-proxy.md](docs/design/sys-mcp-proxy.md) | proxy 详细设计 |
-| [docs/design/sys-mcp-client.md](docs/design/sys-mcp-client.md) | client 详细设计 |
 | [docs/design/implementation-status.md](docs/design/implementation-status.md) | 设计与实现状态对照 |
 | [docs/usage/getting-started.md](docs/usage/getting-started.md) | 用户快速上手指南 |
 | [docs/testing/local-e2e-test.md](docs/testing/local-e2e-test.md) | 本地端到端测试流程 |

@@ -1,23 +1,20 @@
 [Unit]
-Description=sys-mcp-agent — MCP physical machine resource agent
+Description=sysplane-center — Sysplane control plane
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/sys-mcp-agent --config /etc/sys-mcp/agent.yaml
+ExecStart=/usr/local/bin/sysplane-center --config /etc/sysplane/center.yaml
 Restart=on-failure
 RestartSec=5s
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=sys-mcp-agent
+SyslogIdentifier=sysplane-center
 
-# Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
-ProtectHome=read-only
 PrivateTmp=true
-ReadOnlyPaths=/
 
 [Install]
 WantedBy=multi-user.target

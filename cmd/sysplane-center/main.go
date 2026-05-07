@@ -4,17 +4,17 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	_ "github.com/jimmicro/version"
 	"os"
 	"os/signal"
 	"syscall"
-	_ "github.com/jimmicro/version"
 
 	center "github.com/jimyag/sys-mcp/internal/sys-mcp-center"
 )
 
 var defaultConfigPaths = []string{
-	"./sys-mcp-center.yaml",
-	"/etc/sys-mcp/center.yaml",
+	"./sysplane-center.yaml",
+	"/etc/sysplane/center.yaml",
 }
 
 func main() {

@@ -1,16 +1,16 @@
 [Unit]
-Description=sys-mcp-center — MCP central server
+Description=sysplane-proxy — Sysplane IDC aggregation proxy
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/sys-mcp-center --config /etc/sys-mcp/center.yaml
+ExecStart=/usr/local/bin/sysplane-proxy --config /etc/sysplane/proxy.yaml
 Restart=on-failure
 RestartSec=5s
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=sys-mcp-center
+SyslogIdentifier=sysplane-proxy
 
 NoNewPrivileges=true
 ProtectSystem=strict

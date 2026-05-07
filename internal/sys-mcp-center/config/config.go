@@ -1,14 +1,15 @@
-// Package config holds the configuration structure and loader for sys-mcp-center.
+// Package config holds the configuration structure and loader for sysplane-center.
 package config
 
 import (
 	"fmt"
 	"os"
 
+	"github.com/jimyag/sys-mcp/internal/pkg/tokenauth"
 	"gopkg.in/yaml.v3"
 )
 
-// CenterConfig is the root configuration for sys-mcp-center.
+// CenterConfig is the root configuration for sysplane-center.
 type CenterConfig struct {
 	Listen   Listen   `yaml:"listen"`
 	Auth     Auth     `yaml:"auth"`
@@ -35,10 +36,14 @@ type TLS struct {
 
 // Auth holds authentication tokens.
 type Auth struct {
-	// ClientTokens are accepted for MCP HTTP connections (AI clients).
+	// ClientTokens are accepted for business HTTP/MCP requests.
 	ClientTokens []string `yaml:"client_tokens"`
-	// AgentTokens are accepted for gRPC tunnel connections (agents/proxies).
+	// AdminTokens are accepted for management HTTP requests.
+	AdminTokens []string `yaml:"admin_tokens"`
+	// AgentTokens are accepted for agent gRPC tunnel registrations.
 	AgentTokens []string `yaml:"agent_tokens"`
+	// ProxyTokens are accepted for proxy gRPC tunnel registrations.
+	ProxyTokens []string `yaml:"proxy_tokens"`
 }
 
 // Router holds routing-related config.
@@ -129,8 +134,22 @@ func applyDefaults(cfg *CenterConfig) {
 }
 
 func validate(cfg *CenterConfig) error {
+	if len(cfg.Auth.ClientTokens) == 0 && len(cfg.Auth.AdminTokens) == 0 {
+		return fmt.Errorf("at least one of auth.client_tokens or auth.admin_tokens must be configured")
+	}
 	if len(cfg.Auth.AgentTokens) == 0 {
 		return fmt.Errorf("auth.agent_tokens must have at least one token")
+	}
+	if len(cfg.Auth.ProxyTokens) == 0 {
+		return fmt.Errorf("auth.proxy_tokens must have at least one token")
+	}
+	if _, err := tokenauth.NewCatalog(
+		cfg.Auth.ClientTokens,
+		cfg.Auth.AdminTokens,
+		cfg.Auth.AgentTokens,
+		cfg.Auth.ProxyTokens,
+	); err != nil {
+		return fmt.Errorf("auth token validation failed: %w", err)
 	}
 	if cfg.Database.Enable && cfg.HA.InternalAddress == "" {
 		return fmt.Errorf("ha.internal_address must be set when database.enable=true")

@@ -149,6 +149,49 @@ func TestReadFile_Tail(t *testing.T) {
 	}
 }
 
+func TestReadFile_Range(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+	os.WriteFile(path, []byte("abcdef"), 0o644)
+
+	out, err := fileops.ReadFile(context.Background(), allowAllGuard, 100, fmt.Sprintf(`{"path":%q,"offset":2,"length":3}`, path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var res fileops.ReadFileResult
+	json.Unmarshal([]byte(out), &res)
+	if res.Content != "cde" {
+		t.Fatalf("expected cde, got %q", res.Content)
+	}
+}
+
+func TestWriteFile_CreateAndOverwrite(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "f.txt")
+
+	out, err := fileops.WriteFile(context.Background(), allowAllGuard, fmt.Sprintf(`{"path":%q,"content":"hello","overwrite":false}`, path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var res fileops.WriteFileResult
+	json.Unmarshal([]byte(out), &res)
+	if !res.Created || res.BytesWritten != 5 {
+		t.Fatalf("unexpected create result: %+v", res)
+	}
+
+	if _, err := fileops.WriteFile(context.Background(), allowAllGuard, fmt.Sprintf(`{"path":%q,"content":"x","overwrite":false}`, path)); err == nil {
+		t.Fatal("expected exclusive create error")
+	}
+
+	if _, err := fileops.WriteFile(context.Background(), allowAllGuard, fmt.Sprintf(`{"path":%q,"content":"world","overwrite":true}`, path)); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	if string(data) != "world" {
+		t.Fatalf("expected overwritten content, got %q", string(data))
+	}
+}
+
 func TestReadFile_SizeLimit(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "big.txt")

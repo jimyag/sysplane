@@ -5,7 +5,6 @@ package tunnel
 import (
 	"context"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
@@ -14,6 +13,7 @@ import (
 
 	"github.com/jimyag/sys-mcp/api/tunnel"
 	pkgstream "github.com/jimyag/sys-mcp/internal/pkg/stream"
+	"github.com/jimyag/sys-mcp/internal/pkg/tokenauth"
 	"github.com/jimyag/sys-mcp/internal/sys-mcp-proxy/registry"
 )
 
@@ -29,7 +29,7 @@ type Upstream interface {
 type DownstreamService struct {
 	tunnel.UnimplementedTunnelServiceServer
 	reg           *registry.Registry
-	agentTokens   []string
+	tokens        *tokenauth.Catalog
 	upstream      Upstream
 	proxyHostname string
 	logger        *slog.Logger
@@ -41,14 +41,14 @@ type DownstreamService struct {
 // NewDownstreamService creates a DownstreamService.
 func NewDownstreamService(
 	reg *registry.Registry,
-	agentTokens []string,
+	tokens *tokenauth.Catalog,
 	upstream Upstream,
 	proxyHostname string,
 	logger *slog.Logger,
 ) *DownstreamService {
 	return &DownstreamService{
 		reg:           reg,
-		agentTokens:   agentTokens,
+		tokens:        tokens,
 		upstream:      upstream,
 		proxyHostname: proxyHostname,
 		logger:        logger,
@@ -66,7 +66,7 @@ func (s *DownstreamService) Connect(srv tunnel.TunnelService_ConnectServer) erro
 		return status.Error(codes.InvalidArgument, "first message must be RegisterRequest")
 	}
 
-	if !s.validToken(req.Token) {
+	if _, err := s.tokens.AuthenticateRegistration(registrationDomain(req.NodeType), req.Token); err != nil {
 		_ = srv.Send(&tunnel.TunnelMessage{
 			Payload: &tunnel.TunnelMessage_RegisterAck{
 				RegisterAck: &tunnel.RegisterAck{Success: false, Message: "invalid token"},
@@ -258,14 +258,11 @@ func (s *DownstreamService) ReregisterAll(ctx context.Context) {
 	}
 }
 
-func (s *DownstreamService) validToken(token string) bool {
-	token = strings.TrimPrefix(token, "Bearer ")
-	for _, t := range s.agentTokens {
-		if t == token {
-			return true
-		}
+func registrationDomain(nodeType tunnel.NodeType) tokenauth.Domain {
+	if nodeType == tunnel.NodeType_NODE_TYPE_PROXY {
+		return tokenauth.DomainProxy
 	}
-	return false
+	return tokenauth.DomainAgent
 }
 
 func nodeTypeStr(nt tunnel.NodeType) string {
