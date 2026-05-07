@@ -40,11 +40,12 @@ https://<center-host>/v1
 
 ### 2.2 Content Type
 
-请求与响应统一使用：
+请求统一使用 `application/json`。
 
-```text
-Content-Type: application/json
-```
+响应 Content-Type：
+
+- 大多数接口返回 `application/json`
+- `POST /v1/nodes/{id}/command-templates/{template_id}/invoke`（透明执行端点）例外：响应 Content-Type 由命令实际输出决定，可能为 `text/plain` 或 `application/json`，详见第六节
 
 文件下载、流式输出等特殊场景在后续版本单独定义。
 
@@ -408,7 +409,49 @@ env=prod,idc=sh-1
 - 返回 `Node`
 - 节点不存在时返回 `404 NODE_NOT_FOUND`
 
-### 5.3 `GET /v1/nodes/{node_id}/capabilities`
+### 5.3 `GET /v1/nodes/{node_id}/config`
+
+用途：读取节点当前安全配置。client token 和 admin token 均可访问。
+
+响应示例：
+
+```json
+{
+  "data": {
+    "allowed_commands": ["/usr/bin/docker", "/bin/ls"],
+    "allowed_paths": [],
+    "blocked_paths": ["/proc", "/sys", "/dev"],
+    "max_file_size_mb": 100,
+    "allow_privileged_ports": false,
+    "allowed_ports": []
+  }
+}
+```
+
+注意：响应不包含 token、upstream 地址等敏感字段，仅暴露安全策略配置。
+
+### 5.4 `PATCH /v1/nodes/{node_id}/config`
+
+用途：更新节点安全配置，变更立即生效（热重载），同时写入 agent 本地配置文件（重启后持久化）。需要 admin token。
+
+请求 body 结构与 GET 响应的 `data` 字段相同，支持整体替换：
+
+```json
+{
+  "allowed_commands": ["/usr/bin/docker", "/bin/ls", "/usr/bin/python3"],
+  "allowed_paths": [],
+  "blocked_paths": ["/proc", "/sys", "/dev"],
+  "max_file_size_mb": 100,
+  "allow_privileged_ports": false,
+  "allowed_ports": []
+}
+```
+
+响应：返回更新后的完整配置（同 GET）。
+
+错误：若节点离线或 agent 写文件失败，返回对应错误码。
+
+### 5.5 `GET /v1/nodes/{node_id}/capabilities`
 
 响应示例：
 
@@ -561,24 +604,61 @@ env=prod,idc=sh-1
 - 是否允许修改 `executor`，取决于治理要求
 - 若允许修改，建议按“新版本模板”处理，而不是静默覆盖
 
-### 6.5 `POST /v1/command-templates/{template_id}:invoke`
+### 6.5 `POST /v1/nodes/{node_id}/command-templates/{template_id}/invoke`
 
-用途：
+**透明执行端点**。在指定节点上同步执行命令模板，响应内容完全由命令输出决定，不产生 Invocation 记录。
 
-- 调用模板
+适用场景：脚本调用、CLI 管道、需要直接消费命令输出的场合。
+
+请求示例：
+
+```bash
+POST /v1/nodes/db-prod-01/command-templates/docker.ps/invoke
+Authorization: Bearer <client-token>
+Content-Type: application/json
+
+{
+  "params": { "all": true },
+  "timeout_sec": 10
+}
+```
+
+响应规则：
+
+| 条件 | HTTP 状态 | Content-Type | Body |
+|------|-----------|--------------|------|
+| exit_code = 0，输出为 JSON | 200 | application/json | stdout 原文 |
+| exit_code = 0，输出为文本 | 200 | text/plain | stdout 原文 |
+| exit_code ≠ 0 | 422 | application/json | `{"exit_code":N,"stdout":"...","stderr":"..."}` |
+| 节点不可达 | 503 | application/json | 标准错误结构 |
+| 节点不存在 | 404 | application/json | 标准错误结构 |
+| 执行超时 | 504 | application/json | 标准错误结构 |
+
+响应头始终携带 `X-Exit-Code`（字符串形式的整数）。
+
+约束：
+
+- 仅支持单节点，不支持 targets 批量
+- 始终同步阻塞，不支持 async
+- 不产生 Invocation 记录，不写入审计事件
+- 风险控制同样有效：`mutating`/`dangerous` 模板需要 admin token
+
+### 6.6 `POST /v1/command-templates/{template_id}:invoke`（invocation 模型）
+
+通过 Invocation 模型执行模板，支持结果持久化与查询。详见第七节。
 
 请求示例：
 
 ```json
 {
   "targets": {
-    "node_ids": ["node_01J0A1", "node_01J0A2"]
+    "node_ids": ["node_01J0A1"]
   },
   "params": {
     "all": true
   },
   "timeout_sec": 10,
-  "async": true
+  "async": false
 }
 ```
 
@@ -1023,6 +1103,16 @@ v1 之后可继续扩展：
 
 | 项目 | 说明 |
 | ---- | ---- |
-| 状态 | API v1 草案 |
+| 状态 | API v1 已实现 |
 | 依赖文档 | `docs/design/sysplane-vision.md` |
-| 当前范围 | 节点、命令模板、统一执行 |
+| 当前范围 | 节点、节点配置、命令模板透明执行、统一执行、审计 |
+
+### 已实现接口清单
+
+节点：`GET /v1/nodes`、`GET /v1/nodes/{id}`、`GET /v1/nodes/{id}/capabilities`、`POST /v1/nodes/{id}/actions/{action}`、`GET /v1/nodes/{id}/config`、`PATCH /v1/nodes/{id}/config`
+
+命令模板：`GET/POST /v1/command-templates`、`GET/PATCH /v1/command-templates/{id}`、`POST /v1/nodes/{id}/command-templates/{template_id}/invoke`、`POST /v1/command-templates/{id}:invoke`
+
+执行记录：`GET/POST /v1/invocations`、`GET /v1/invocations/{id}`、`GET /v1/invocations/{id}/results`、`POST /v1/invocations/{id}:cancel`
+
+审计：`GET /v1/audit/events`、`GET /v1/audit/events/{id}`

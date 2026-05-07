@@ -62,7 +62,7 @@ task build
 # 产物输出到 bin/ 目录
 ```
 
-依赖：Go 1.21+，[Task](https://taskfile.dev)
+依赖：Go 1.22+，[Task](https://taskfile.dev)
 
 ### 最小化部署（单台机器测试）
 
@@ -91,11 +91,13 @@ bin/sysplane --server http://127.0.0.1:18880 --token your-client-token nodes lis
 | 能力 | 说明 |
 |------|------|
 | 节点视图 | 浏览节点、能力、路由路径，并执行内置动作 |
-| 命令模板 | 创建、更新、启停和调用 `command template` |
+| 命令模板 | 创建、更新、启停命令模板 |
+| 透明执行 | 单节点同步执行命令模板，响应内容由命令输出决定 |
 | Invocation 执行中心 | 统一执行内置动作和命令模板，支持同步/异步、结果查询和取消 |
 | 审计查询 | 查看执行与模板变更相关的审计事件 |
+| 节点安全配置 | 通过 admin API 远程读写 agent 安全配置，支持热重载，无需重启 agent |
 
-命令模板的实际执行仍受 agent 侧白名单控制：`security.allowed_commands` 为空时，agent 默认拒绝执行任何命令。
+命令模板的实际执行受 agent 侧白名单控制：`security.allowed_commands` 为空时，agent 拒绝执行任何命令。可通过 `GET/PATCH /v1/nodes/{id}/config` 动态更新白名单。
 
 ---
 
@@ -110,10 +112,11 @@ http://<center-host>:<http-port>/web/
 WebUI 当前支持：
 
 - 使用 `client token` 或 `admin token` 登录
-- 浏览节点、能力与快捷动作
+- 浏览节点、能力与快捷动作（每种动作独立渲染：sys.info 显示指标卡、sys.hardware 显示用量条、fs.list 显示文件浏览器、fs.read 显示代码查看器等）
 - 管理命令模板（创建 / 更新 / 启停 / 调用）
 - 查看 Invocation 列表、详情、结果并取消执行
 - 查看审计事件
+- 节点安全配置：在节点详情页读取并修改 agent 安全策略，保存后立即热重载
 
 当前这套后台按 v1 范围已完整；RBAC、OIDC、审批流和动态策略控制台仍不在本轮范围内。
 
@@ -121,29 +124,52 @@ WebUI 当前支持：
 
 ## HTTP API
 
-当前主要接口包括：
+### 节点
 
-- `GET /v1/nodes`
-- `GET /v1/nodes/{id}`
-- `GET /v1/nodes/{id}/capabilities`
-- `POST /v1/nodes/{id}/actions/fs:list`
-- `POST /v1/nodes/{id}/actions/fs:read`
-- `POST /v1/nodes/{id}/actions/fs:stat`
-- `POST /v1/nodes/{id}/actions/fs:write`
-- `POST /v1/nodes/{id}/actions/sys:info`
-- `POST /v1/nodes/{id}/actions/sys:hardware`
-- `GET /v1/command-templates`
-- `POST /v1/command-templates`
-- `GET /v1/command-templates/{id}`
-- `PATCH /v1/command-templates/{id}`
-- `POST /v1/command-templates/{id}:invoke`
-- `GET /v1/invocations`
-- `POST /v1/invocations`
-- `GET /v1/invocations/{id}`
-- `GET /v1/invocations/{id}/results`
-- `POST /v1/invocations/{id}:cancel`
-- `GET /v1/audit/events`
-- `GET /v1/audit/events/{id}`
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/v1/nodes` | 列出节点（支持 hostname/status 过滤） |
+| GET | `/v1/nodes/{id}` | 查询节点详情 |
+| GET | `/v1/nodes/{id}/capabilities` | 查询节点能力列表 |
+| POST | `/v1/nodes/{id}/actions/{action}` | 执行内置动作（fs.list / fs.read / sys.info 等） |
+| GET | `/v1/nodes/{id}/config` | 读取节点安全配置（client/admin token） |
+| PATCH | `/v1/nodes/{id}/config` | 更新节点安全配置并热重载（admin token） |
+
+### 命令模板
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/v1/command-templates` | 列出模板 |
+| POST | `/v1/command-templates` | 创建模板（admin token） |
+| GET | `/v1/command-templates/{id}` | 查询模板详情 |
+| PATCH | `/v1/command-templates/{id}` | 更新模板（admin token） |
+| POST | `/v1/nodes/{id}/command-templates/{template_id}/invoke` | 在指定节点同步执行模板，透明透传命令输出 |
+
+### 执行记录与审计
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/v1/invocations` | 列出执行记录 |
+| POST | `/v1/invocations` | 创建执行记录（支持 builtin / command_template） |
+| GET | `/v1/invocations/{id}` | 查询执行记录 |
+| GET | `/v1/invocations/{id}/results` | 查询各节点执行结果 |
+| POST | `/v1/invocations/{id}:cancel` | 取消执行 |
+| GET | `/v1/audit/events` | 列出审计事件 |
+| GET | `/v1/audit/events/{id}` | 查询审计事件详情 |
+
+### 透明执行语义
+
+`POST /v1/nodes/{id}/command-templates/{template_id}/invoke` 是面向单节点同步调用的轻量端点，不产生 invocation 记录：
+
+```
+请求 body：{ "params": {}, "timeout_sec": 10 }
+
+exit 0  → HTTP 200，Content-Type 由输出决定（text/plain 或 application/json），body = stdout
+exit ≠ 0 → HTTP 422，application/json，{ "exit_code": N, "stdout": "...", "stderr": "..." }
+节点异常 → HTTP 4xx/5xx，标准错误结构
+```
+
+响应头始终携带 `X-Exit-Code`。
 
 ---
 
