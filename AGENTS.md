@@ -58,7 +58,7 @@ internal/
   ```bash
   task build   # 编译所有二进制到 bin/
   task test    # 运行所有单元测试
-  task vet     # 运行 go vet
+  task lint    # 运行 golangci-lint
   ```
 
 ### Proto 更新流程
