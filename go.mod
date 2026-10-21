@@ -7,7 +7,7 @@ toolchain go1.27.3
 require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.11.0
-	github.com/jimmicro/version v1.0.0
+	github.com/jimmicro/version v1.1.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/shirou/gopsutil/v4 v4.26.9
 	golang.org/x/sync v0.24.0
